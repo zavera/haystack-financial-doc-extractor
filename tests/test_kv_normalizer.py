@@ -86,6 +86,28 @@ class TestConfidenceFiltering:
         assert len(result["fields"]) == 1
 
 
+class TestNonNegativeFields:
+    def test_parenthetical_treated_as_positive_for_non_negative_field(self):
+        norm = KvNormalizer(
+            field_map={"wages salaries tips": "wages"},
+            section="HHA_INCOME",
+            source_doc_type="W-2",
+            non_negative_fields=["wages"],
+        )
+        result = norm.run(extraction([KvEntry("wages salaries tips", "(68,500)", Decimal("0.99"))]))
+        assert result["fields"][0].extracted_value == Decimal("68500")
+
+    def test_parenthetical_still_negative_for_other_fields(self):
+        norm = KvNormalizer(
+            field_map={"capital gain or loss": "capital_gain"},
+            section="HHA_INCOME",
+            source_doc_type="IRS Form 1040",
+            non_negative_fields=["wages"],
+        )
+        result = norm.run(extraction([KvEntry("capital gain or loss", "(5,000)", Decimal("0.99"))]))
+        assert result["fields"][0].extracted_value == Decimal("-5000")
+
+
 class TestSectionAndMetadata:
     def test_section_is_attached(self):
         norm = make_normalizer()
