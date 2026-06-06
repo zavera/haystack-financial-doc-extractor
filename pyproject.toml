@@ -1,0 +1,54 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "haystack-financial-doc-extractor"
+version = "0.1.0"
+description = "Haystack components for structured KV extraction from financial documents via Azure Document Intelligence"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+keywords = ["haystack", "financial", "document-extraction", "azure", "kv-extraction", "tax-forms"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "haystack-ai>=2.0.0",
+    "azure-ai-formrecognizer>=3.3.0",
+    "azure-storage-blob>=12.19.0",
+    "pikepdf>=8.0.0",
+    "Pillow>=10.0.0",
+    "sqlalchemy>=2.0.0",
+    "pydantic>=2.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.23.0",
+    "ruff>=0.4.0",
+    "mypy>=1.8.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/your-org/haystack-financial-doc-extractor"
+Issues = "https://github.com/your-org/haystack-financial-doc-extractor/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/haystack_financial_doc_extractor"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
