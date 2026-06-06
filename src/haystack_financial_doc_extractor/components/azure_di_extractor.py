@@ -1,3 +1,17 @@
+# Copyright 2026 Ambreen Zaver, Callisto Tech
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """
 Azure Document Intelligence extractor with 4-stage recovery chain.
 
@@ -6,12 +20,11 @@ Stage 1 — Page splitter: chunk PDF into pages, submit in parallel if Stage 0 r
 Stage 2 — DPI reduction: normalise to 300 DPI if splitter still yields empty pages.
 Stage 3 — Rotation block: try 0°/90°/180°/270° in sequence on any still-empty pages.
 
-Rate limiting: exponential backoff with ±20% jitter on 429 responses.
+Rate limiting: exponential backoff with +/-20% jitter on 429 responses.
 """
 
 import io
 import logging
-import math
 import random
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -43,9 +56,9 @@ class AzureDiExtractor:
     Haystack component that extracts raw KV pairs from financial PDFs using
     Azure Document Intelligence with a 4-stage recovery chain.
 
-    Output is a list of (DocumentPayload, List[KvEntry]) tuples — one per input
-    document. Documents that fail all recovery stages return an empty KV list
-    rather than raising, so the pipeline continues for other documents.
+    Output is a list of extraction result dicts — one per input document.
+    Documents that fail all recovery stages return an empty KV list rather
+    than raising, so the pipeline continues for other documents.
     """
 
     def __init__(
@@ -216,11 +229,11 @@ class AzureDiExtractor:
         return entries
 
     @staticmethod
-    def _reduce_dpi(pdf_bytes: bytes, target_dpi: int = 300) -> bytes:
+    def _reduce_dpi(pdf_bytes: bytes) -> bytes:
         """
         Re-saves the PDF via pikepdf at reduced image quality.
         For true DPI reduction of embedded raster images, a full
-        Pillow rasterise → re-embed loop would be needed; this lightweight
+        Pillow rasterise -> re-embed loop would be needed; this lightweight
         version re-compresses the PDF stream which is sufficient for most
         Azure DI failures caused by oversized pages.
         """
