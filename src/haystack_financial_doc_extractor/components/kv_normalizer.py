@@ -1,14 +1,28 @@
+# Copyright 2026 Ambreen Zaver, Callisto Tech
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """
 KV normalizer component.
 
 Converts raw string key-value pairs from Azure DI into typed ExtractedField
 objects with Decimal values. Handles common financial document formatting:
 
-  - Currency symbols:        "$75,000"     → Decimal("75000")
-  - Parenthetical negatives: "(12,500)"    → Decimal("-12500")
-  - Trailing descriptors:    "75,000 USD"  → Decimal("75000")
-  - Blank / N/A values:      "N/A", ""     → None
-  - Percent values:          "12.5%"       → Decimal("0.125")
+  - Currency symbols:        "$75,000"     -> Decimal("75000")
+  - Parenthetical negatives: "(12,500)"    -> Decimal("-12500")
+  - Trailing descriptors:    "75,000 USD"  -> Decimal("75000")
+  - Blank / N/A values:      "N/A", ""     -> None
+  - Percent values:          "12.5%"       -> Decimal("0.125")
 """
 
 import logging
@@ -109,11 +123,9 @@ class KvNormalizer:
         lower = raw_key.lower().strip()
         if lower in self.field_map:
             return self.field_map[lower]
-        # fuzzy: strip punctuation, try again
         simplified = re.sub(r"[^a-z0-9 ]", "", lower).strip()
         if simplified in self.field_map:
             return self.field_map[simplified]
-        # fallback: snake_case the raw key
         return re.sub(r"\s+", "_", simplified)
 
     @staticmethod
@@ -122,7 +134,6 @@ class KvNormalizer:
         if stripped.lower() in _BLANK_VALUES:
             return None, stripped
 
-        # percent
         pct_match = _PERCENT.match(stripped)
         if pct_match:
             try:
@@ -130,14 +141,11 @@ class KvNormalizer:
             except InvalidOperation:
                 pass
 
-        # parenthetical negative: (12,500)
         paren_match = _PARENS_NEGATIVE.match(stripped)
         working = paren_match.group(1) if paren_match else stripped
         negative = paren_match is not None
 
-        # strip currency symbols and commas
         working = _CURRENCY_STRIP.sub("", working)
-        # strip trailing alpha (e.g. "USD", "CAD")
         working = _TRAILING_ALPHA.sub("", working).strip()
 
         try:
