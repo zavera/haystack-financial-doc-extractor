@@ -72,11 +72,15 @@ class KvNormalizer:
         section: str,
         source_doc_type: str,
         confidence_threshold: float = 0.5,
+        non_negative_fields: list[str] | None = None,
     ) -> None:
         self.field_map = {k.lower(): v for k, v in field_map.items()}
         self.section = section
         self.source_doc_type = source_doc_type
         self.confidence_threshold = Decimal(str(confidence_threshold))
+        # Canonical field names where parenthetical notation means positive, not negative.
+        # E.g. W-2 box values are never negative even if printed in parens.
+        self.non_negative_fields: set[str] = set(non_negative_fields or [])
 
     @component.output_types(fields=list[ExtractedField])
     def run(self, extractions: list[dict[str, Any]]) -> dict:
@@ -108,7 +112,8 @@ class KvNormalizer:
 
     def _normalise_entry(self, entry: KvEntry) -> ExtractedField:
         canonical_name = self._resolve_field_name(entry.key)
-        normalised_value, raw_value = self._parse_value(entry.value)
+        allow_negative = canonical_name not in self.non_negative_fields
+        normalised_value, raw_value = self._parse_value(entry.value, allow_negative=allow_negative)
         return ExtractedField(
             field_name=canonical_name,
             extracted_value=normalised_value,
@@ -129,7 +134,7 @@ class KvNormalizer:
         return re.sub(r"\s+", "_", simplified)
 
     @staticmethod
-    def _parse_value(raw: str) -> tuple[Decimal | None, str]:
+    def _parse_value(raw: str, allow_negative: bool = True) -> tuple[Decimal | None, str]:
         stripped = raw.strip()
         if stripped.lower() in _BLANK_VALUES:
             return None, stripped
@@ -143,7 +148,8 @@ class KvNormalizer:
 
         paren_match = _PARENS_NEGATIVE.match(stripped)
         working = paren_match.group(1) if paren_match else stripped
-        negative = paren_match is not None
+        # Only treat parens as negative if the field permits it.
+        negative = paren_match is not None and allow_negative
 
         working = _CURRENCY_STRIP.sub("", working)
         working = _TRAILING_ALPHA.sub("", working).strip()
@@ -164,6 +170,7 @@ class KvNormalizer:
             section=self.section,
             source_doc_type=self.source_doc_type,
             confidence_threshold=float(self.confidence_threshold),
+            non_negative_fields=list(self.non_negative_fields),
         )
 
     @classmethod
