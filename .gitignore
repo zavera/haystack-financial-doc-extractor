@@ -10,3 +10,9 @@ build/
 .mypy_cache/
 .ruff_cache/
 .pytest_cache/
+
+# Never commit real tax documents or extraction output — FERPA
+# Only the synthetic samples/ files are safe to commit.
+# If you add real documents for local testing, put them in local-docs/ (gitignored).
+local-docs/
+real-samples/
