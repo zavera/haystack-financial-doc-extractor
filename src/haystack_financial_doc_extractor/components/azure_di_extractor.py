@@ -124,7 +124,7 @@ class AzureDiExtractor:
             entries, stage = self._run_recovery_chain(doc.bytes_)
             return {**base, "kv_entries": entries, "stage_used": stage, "error": None}
         except Exception as exc:
-            logger.error("All recovery stages failed for %s: %s", doc.document_id, exc)
+            logger.error("All recovery stages failed for document [id redacted]: %s", exc)
             return {**base, "kv_entries": [], "stage_used": "ERROR", "error": str(exc)}
 
     def _run_recovery_chain(self, pdf_bytes: bytes) -> tuple[list[KvEntry], str]:

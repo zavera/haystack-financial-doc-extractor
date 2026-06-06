@@ -99,11 +99,9 @@ class KvNormalizer:
             for entry in kv_entries:
                 if entry.confidence < self.confidence_threshold:
                     logger.debug(
-                        "Skipping low-confidence entry '%s' (%.2f < %.2f) from %s",
-                        entry.key,
+                        "Skipping low-confidence entry (confidence=%.2f < threshold=%.2f)",
                         entry.confidence,
                         self.confidence_threshold,
-                        source_name,
                     )
                     continue
                 field = self._normalise_entry(entry)
@@ -160,7 +158,7 @@ class KvNormalizer:
                 value = -value
             return value, stripped
         except InvalidOperation:
-            logger.debug("Could not parse value '%s' as Decimal — storing None", raw)
+            logger.debug("Could not parse raw value as Decimal — storing None (value redacted)")
             return None, stripped
 
     def to_dict(self) -> dict:
