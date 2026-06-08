@@ -1,18 +1,35 @@
+# Python
 __pycache__/
 *.py[cod]
+*.pyo
 *.egg-info/
 dist/
 build/
-.venv/
-*.db
-*.log
-.env
-.mypy_cache/
-.ruff_cache/
-.pytest_cache/
+.eggs/
 
-# Never commit real tax documents or extraction output — FERPA
-# Only the synthetic samples/ files are safe to commit.
-# If you add real documents for local testing, put them in local-docs/ (gitignored).
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Hatch
+.hatch/
+
+# Test / coverage
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# OS
+.DS_Store
+
+# Never commit real tax documents
 local-docs/
 real-samples/
+*.env

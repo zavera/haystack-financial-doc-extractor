@@ -1,27 +1,16 @@
-# Copyright 2026 Ambreen Zaver, Callisto Tech
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-FileCopyrightText: 2026 Ambreen Zaver, Callisto Tech
+# SPDX-License-Identifier: Apache-2.0
 
 """
 Delta calculator component.
 
 Computes the difference between extracted field values and reference values
-(e.g. values from an authoritative system like PowerFAIDS), then assigns
-severity based on configurable thresholds.
+(e.g. values from an authoritative system), then assigns severity based on
+configurable thresholds.
 
 Severity logic:
-  HIGH   — delta exceeds high_threshold (default $500)
-  MEDIUM — delta exceeds medium_threshold (default $100)
+  HIGH   — |delta| >= high_threshold (default $500)
+  MEDIUM — |delta| >= medium_threshold (default $100)
   LOW    — any non-zero delta below medium_threshold
 
 Reference values are supplied as a dict keyed by canonical field_name.
@@ -34,14 +23,15 @@ from typing import Any
 
 from haystack import component, default_from_dict, default_to_dict
 
-from ..models.extracted_field import ExtractedField, Severity
+from .models.extracted_field import ExtractedField, Severity
 
 
 @component
 class DeltaCalculator:
-    """
-    Haystack component that annotates ExtractedField objects with delta and severity
-    by comparing extracted_value against a provided reference dict.
+    """Haystack component that annotates ExtractedField objects with delta and severity.
+
+    Compares ``extracted_value`` against a provided reference dict and populates
+    ``delta`` and ``severity`` on each field.
 
     Args:
         high_threshold:   Absolute delta (inclusive) that triggers HIGH severity.
@@ -57,19 +47,17 @@ class DeltaCalculator:
         self.medium_threshold = Decimal(str(medium_threshold))
 
     @component.output_types(fields=list[ExtractedField])
-    def run(
-        self,
-        fields: list[ExtractedField],
-        reference_values: dict[str, Any],
-    ) -> dict:
-        """
+    def run(self, fields: list[ExtractedField], reference_values: dict[str, Any]) -> dict:
+        """Annotate fields with delta and severity against reference values.
+
         Args:
             fields:           Normalised ExtractedField list from KvNormalizer.
-            reference_values: Dict mapping canonical field_name → numeric reference value.
-                              Values can be int, float, str, or Decimal.
+            reference_values: Dict mapping canonical field_name to a numeric
+                              reference value (int, float, str, or Decimal).
 
         Returns:
-            fields: Same list with delta and severity populated where a reference exists.
+            fields: Same list with ``delta`` and ``severity`` populated where
+                    a matching reference exists.
         """
         ref = {k: self._to_decimal(v) for k, v in reference_values.items()}
         annotated: list[ExtractedField] = []
@@ -89,8 +77,6 @@ class DeltaCalculator:
             return Severity.HIGH
         if abs_delta >= self.medium_threshold:
             return Severity.MEDIUM
-        if abs_delta > Decimal("0"):
-            return Severity.LOW
         return Severity.LOW
 
     @staticmethod

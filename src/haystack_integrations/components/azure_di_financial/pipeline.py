@@ -1,31 +1,22 @@
-# Copyright 2026 Ambreen Zaver, Callisto Tech
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-FileCopyrightText: 2026 Ambreen Zaver, Callisto Tech
+# SPDX-License-Identifier: Apache-2.0
 
 """
 Pre-wired Haystack pipeline for financial document KV extraction.
 
+::
+
     BytesIngestionComponent
-            ↓
+            |
     AzureDiExtractor
-            ↓
+            |
     KvNormalizer
-            ↓
+            |
     DeltaCalculator
 
-Usage:
+Usage::
 
-    from haystack_financial_doc_extractor import build_pipeline
+    from haystack_integrations.components.azure_di_financial import build_pipeline
 
     pipeline = build_pipeline(
         azure_endpoint="https://<resource>.cognitiveservices.azure.com/",
@@ -51,10 +42,10 @@ Usage:
 
 from haystack import Pipeline
 
-from .components.azure_di_extractor import AzureDiExtractor
-from .components.delta_calculator import DeltaCalculator
-from .components.document_ingestion import BytesIngestionComponent
-from .components.kv_normalizer import KvNormalizer
+from .azure_di_extractor import AzureDiExtractor
+from .delta_calculator import DeltaCalculator
+from .document_ingestion import BytesIngestionComponent
+from .kv_normalizer import KvNormalizer
 
 
 def build_pipeline(
@@ -69,19 +60,18 @@ def build_pipeline(
     medium_threshold: float = 100.0,
     max_workers: int = 4,
 ) -> Pipeline:
-    """
-    Build and connect the full extraction pipeline.
+    """Build and connect the full extraction pipeline.
 
     Args:
         azure_endpoint:       Azure Document Intelligence endpoint URL.
         azure_api_key:        Azure DI API key.
-        field_map:            Raw Azure DI key → canonical field name mapping.
-        section:              Section label applied to all extracted fields (e.g. "HHA_INCOME").
-        source_doc_type:      Human-readable document type (e.g. "IRS Form 1040").
-        model_id:             Azure DI model. Default: prebuilt-document.
+        field_map:            Raw Azure DI key -> canonical field name mapping.
+        section:              Section label applied to all extracted fields.
+        source_doc_type:      Human-readable document type label.
+        model_id:             Azure DI model. Default: ``prebuilt-document``.
         confidence_threshold: Drop KV entries below this confidence.
-        high_threshold:       Delta ≥ this → HIGH severity.
-        medium_threshold:     Delta ≥ this → MEDIUM severity.
+        high_threshold:       Delta >= this -> HIGH severity.
+        medium_threshold:     Delta >= this -> MEDIUM severity.
         max_workers:          Thread pool size for parallel page/chunk processing.
 
     Returns:
@@ -110,10 +100,7 @@ def build_pipeline(
     )
     pipeline.add_component(
         "delta",
-        DeltaCalculator(
-            high_threshold=high_threshold,
-            medium_threshold=medium_threshold,
-        ),
+        DeltaCalculator(high_threshold=high_threshold, medium_threshold=medium_threshold),
     )
 
     pipeline.connect("ingest.documents", "extractor.documents")
