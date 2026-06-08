@@ -1,16 +1,5 @@
-# Copyright 2026 Ambreen Zaver, Callisto Tech
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-FileCopyrightText: 2026 Ambreen Zaver, Callisto Tech
+# SPDX-License-Identifier: Apache-2.0
 
 """
 Placeholder ingestion component.
@@ -25,12 +14,14 @@ ingestion-source agnostic.
 
 from dataclasses import dataclass, field
 from typing import Any
+
 from haystack import component, default_from_dict, default_to_dict
 
 
 @dataclass
 class DocumentPayload:
     """Raw document ready for extraction."""
+
     bytes_: bytes
     document_id: str
     source_name: str
@@ -42,11 +33,12 @@ class DocumentIngestionComponent:
     """
     Stub ingestion component.
 
-    Replace `run()` body with your DMS fetch logic. The output contract —
+    Replace ``run()`` body with your DMS fetch logic. The output contract —
     a list of DocumentPayload — must remain stable so that AzureDiExtractor
     can consume it unchanged.
 
     Example sources to wire here:
+
     - Azure Blob Storage
     - AWS S3
     - Local filesystem (for testing)
@@ -56,8 +48,7 @@ class DocumentIngestionComponent:
 
     @component.output_types(documents=list[DocumentPayload])
     def run(self, document_ids: list[str]) -> dict:
-        """
-        Fetch raw PDF bytes for each document_id.
+        """Fetch raw PDF bytes for each document_id.
 
         Args:
             document_ids: Opaque identifiers understood by your DMS.
@@ -95,6 +86,17 @@ class BytesIngestionComponent:
         source_names: list[str],
         metadata_list: list[dict[str, Any]] | None = None,
     ) -> dict:
+        """Wrap pre-fetched bytes into DocumentPayload objects.
+
+        Args:
+            bytes_list:    Raw PDF bytes, one per document.
+            document_ids:  Opaque document identifiers (never logged).
+            source_names:  Human-readable source labels for audit.
+            metadata_list: Optional per-document metadata dicts.
+
+        Returns:
+            documents: List of DocumentPayload ready for AzureDiExtractor.
+        """
         if metadata_list is None:
             metadata_list = [{}] * len(bytes_list)
 

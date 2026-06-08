@@ -1,23 +1,12 @@
-# Copyright 2026 Ambreen Zaver, Callisto Tech
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-FileCopyrightText: 2026 Ambreen Zaver, Callisto Tech
+# SPDX-License-Identifier: Apache-2.0
 
 """
 Azure Document Intelligence extractor with 4-stage recovery chain.
 
 Stage 0 — Full document: submit raw bytes to Azure DI.
 Stage 1 — Page splitter: chunk PDF into pages, submit in parallel if Stage 0 returns empty.
-Stage 2 — DPI reduction: normalise to 300 DPI if splitter still yields empty pages.
+Stage 2 — DPI reduction: re-compress PDF stream if splitter still yields empty pages.
 Stage 3 — Rotation block: try 0°/90°/180°/270° in sequence on any still-empty pages.
 
 Rate limiting: exponential backoff with +/-20% jitter on 429 responses.
@@ -37,8 +26,8 @@ from azure.core.credentials import AzureKeyCredential
 from azure.core.exceptions import HttpResponseError
 from haystack import component, default_from_dict, default_to_dict
 
-from ..models.kv_entry import KvEntry
 from .document_ingestion import DocumentPayload
+from .models.kv_entry import KvEntry
 
 logger = logging.getLogger(__name__)
 
@@ -52,13 +41,21 @@ _DEFAULT_PAGE_CHUNK_SIZE = 10
 
 @component
 class AzureDiExtractor:
-    """
-    Haystack component that extracts raw KV pairs from financial PDFs using
+    """Haystack component that extracts raw KV pairs from financial PDFs using
     Azure Document Intelligence with a 4-stage recovery chain.
 
     Output is a list of extraction result dicts — one per input document.
     Documents that fail all recovery stages return an empty KV list rather
     than raising, so the pipeline continues for other documents.
+
+    Args:
+        endpoint:             Azure Document Intelligence endpoint URL.
+        api_key:              Azure DI API key.
+        model_id:             Azure DI model. Default: ``prebuilt-document``.
+        page_chunk_size:      Pages per parallel chunk in Stage 1. Default: 10.
+        max_retries:          Max retry attempts on 429 rate-limit responses.
+        poll_timeout_seconds: Timeout for each Azure DI polling call.
+        max_workers:          Thread pool size for parallel document/chunk processing.
     """
 
     def __init__(
@@ -85,27 +82,26 @@ class AzureDiExtractor:
 
     @component.output_types(extractions=list[dict[str, Any]])
     def run(self, documents: list[DocumentPayload]) -> dict:
-        """
+        """Extract KV pairs from a list of PDF documents.
+
         Args:
             documents: Raw PDF payloads from an ingestion component.
 
         Returns:
-            extractions: List of dicts, one per document:
+            extractions: List of dicts, one per document::
+
                 {
                     "document_id": str,
                     "source_name": str,
-                    "metadata": dict,
-                    "kv_entries": list[KvEntry],
-                    "stage_used": str,   # STAGE-0 | STAGE-1 | STAGE-2 | STAGE-3 | ERROR
-                    "error": str | None,
+                    "metadata":    dict,
+                    "kv_entries":  list[KvEntry],
+                    "stage_used":  str,   # STAGE-0|STAGE-1|STAGE-2|STAGE-3|ERROR
+                    "error":       str | None,
                 }
         """
         results = []
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            futures = {
-                executor.submit(self._extract_with_recovery, doc): doc
-                for doc in documents
-            }
+            futures = {executor.submit(self._extract_with_recovery, doc): doc for doc in documents}
             for future in as_completed(futures):
                 results.append(future.result())
         return {"extractions": results}
@@ -115,11 +111,7 @@ class AzureDiExtractor:
     # ------------------------------------------------------------------
 
     def _extract_with_recovery(self, doc: DocumentPayload) -> dict:
-        base = {
-            "document_id": doc.document_id,
-            "source_name": doc.source_name,
-            "metadata": doc.metadata,
-        }
+        base = {"document_id": doc.document_id, "source_name": doc.source_name, "metadata": doc.metadata}
         try:
             entries, stage = self._run_recovery_chain(doc.bytes_)
             return {**base, "kv_entries": entries, "stage_used": stage, "error": None}
@@ -128,30 +120,23 @@ class AzureDiExtractor:
             return {**base, "kv_entries": [], "stage_used": "ERROR", "error": str(exc)}
 
     def _run_recovery_chain(self, pdf_bytes: bytes) -> tuple[list[KvEntry], str]:
-        # Stage 0 — full document
         entries = self._analyze_bytes(pdf_bytes)
         if entries:
             return entries, "STAGE-0"
 
         logger.debug("Stage 0 returned empty — trying page splitter")
-
-        # Stage 1 — page splitter (parallel chunks)
         chunks = self._split_pages(pdf_bytes)
         entries = self._analyze_chunks_parallel(chunks)
         if entries:
             return entries, "STAGE-1"
 
         logger.debug("Stage 1 returned empty — trying DPI reduction")
-
-        # Stage 2 — DPI reduction to 300 DPI
         reduced = self._reduce_dpi(pdf_bytes)
         entries = self._analyze_bytes(reduced)
         if entries:
             return entries, "STAGE-2"
 
         logger.debug("Stage 2 returned empty — trying rotation block")
-
-        # Stage 3 — rotation block
         for degrees in _ROTATION_DEGREES:
             rotated = self._rotate_pdf(pdf_bytes, degrees)
             entries = self._analyze_bytes(rotated)
@@ -230,13 +215,7 @@ class AzureDiExtractor:
 
     @staticmethod
     def _reduce_dpi(pdf_bytes: bytes) -> bytes:
-        """
-        Re-saves the PDF via pikepdf at reduced image quality.
-        For true DPI reduction of embedded raster images, a full
-        Pillow rasterise -> re-embed loop would be needed; this lightweight
-        version re-compresses the PDF stream which is sufficient for most
-        Azure DI failures caused by oversized pages.
-        """
+        """Re-compress PDF stream via pikepdf (sufficient for most Azure DI size failures)."""
         with pikepdf.open(io.BytesIO(pdf_bytes)) as pdf:
             buf = io.BytesIO()
             pdf.save(buf, compress_streams=True, stream_decode_level=pikepdf.StreamDecodeLevel.generalized)

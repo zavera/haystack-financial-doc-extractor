@@ -1,54 +1,112 @@
+# SPDX-FileCopyrightText: 2026 Ambreen Zaver, Callisto Tech
+# SPDX-License-Identifier: Apache-2.0
+
 [build-system]
-requires = ["hatchling>=1.21"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 [project]
-name = "haystack-financial-doc-extractor"
-version = "0.1.0"
-description = "Haystack components for structured KV extraction from financial documents via Azure Document Intelligence"
+name = "azure-di-financial-haystack"
+dynamic = ["version"]
+description = "Haystack components for structured KV extraction from financial PDFs via Azure Document Intelligence"
 readme = "README.md"
-license = { text = "Apache-2.0" }
 requires-python = ">=3.10"
-keywords = ["haystack", "financial", "document-extraction", "azure", "kv-extraction", "tax-forms"]
+license = "Apache-2.0"
+keywords = ["haystack", "azure", "document-intelligence", "financial", "extraction", "ocr", "irs", "tax"]
+authors = [
+    { name = "Ambreen Zaver", email = "zaver.ambreen@gmail.com" },
+]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: Apache Software License",
-    "Programming Language :: Python :: 3",
+    "Programming Language :: Python",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
-    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: Implementation :: CPython",
 ]
 dependencies = [
     "haystack-ai>=2.0.0",
     "azure-ai-formrecognizer>=3.3.0",
-    "azure-storage-blob>=12.19.0",
     "pikepdf>=8.0.0",
-    "Pillow>=10.0.0",
-    "sqlalchemy>=2.0.0",
     "pydantic>=2.0.0",
 ]
 
-[project.optional-dependencies]
-dev = [
-    "pytest>=7.0.0",
-    "pytest-asyncio>=0.23.0",
-    "ruff>=0.4.0",
-    "mypy>=1.8.0",
-]
-
 [project.urls]
-Homepage = "https://github.com/your-org/haystack-financial-doc-extractor"
-Issues = "https://github.com/your-org/haystack-financial-doc-extractor/issues"
+Documentation = "https://github.com/zavera/haystack-financial-doc-extractor#readme"
+Issues        = "https://github.com/zavera/haystack-financial-doc-extractor/issues"
+Source        = "https://github.com/zavera/haystack-financial-doc-extractor"
+
+[tool.hatch.version]
+source = "vcs"
+tag-pattern = "v(?P<version>.*)"
+
+[tool.hatch.version.raw-options]
+git_describe_command = 'git describe --tags --match="v[0-9]*"'
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/haystack_financial_doc_extractor"]
+packages = ["src/haystack_integrations"]
+
+[tool.hatch.envs.default]
+installer = "uv"
+dependencies = ["ruff", "mypy"]
+
+[tool.hatch.envs.default.scripts]
+fmt       = "ruff check --fix {args:.} && ruff format {args:.}"
+fmt-check = "ruff check {args:.} && ruff format --check {args:.}"
+
+[tool.hatch.envs.test]
+dependencies = [
+    "pytest",
+    "pytest-cov",
+    "haystack-ai>=2.0.0",
+    "azure-ai-formrecognizer>=3.3.0",
+    "pikepdf>=8.0.0",
+]
+
+[tool.hatch.envs.test.scripts]
+unit        = 'pytest -m "unit" {args:tests}'
+integration = 'pytest -m "integration" {args:tests}'
+all         = "pytest {args:tests}"
+cov         = "pytest --cov=haystack_integrations {args:tests}"
 
 [tool.ruff]
-line-length = 100
-target-version = "py310"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E","F","I","UP","B","C","N","W"]
+ignore = ["B027","C901"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["haystack_integrations"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*"    = ["PLR2004","S101"]
+"examples/**/*" = ["T201"]
+
+[tool.mypy]
+install_types     = true
+non_interactive   = true
+check_untyped_defs = true
+
+[[tool.mypy.overrides]]
+module = ["haystack.*", "azure.*", "pikepdf.*"]
+ignore_missing_imports = true
+
+[tool.coverage.run]
+source   = ["haystack_integrations"]
+branch   = true
+
+[tool.coverage.report]
+omit         = ["*/tests/*", "*/__init__.py"]
+show_missing = true
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
-asyncio_mode = "auto"
+minversion = "6.0"
+markers    = [
+    "unit: fast unit tests — no Azure credentials or network required",
+    "integration: integration tests — require live Azure DI credentials",
+]
+addopts = ["--import-mode=importlib"]

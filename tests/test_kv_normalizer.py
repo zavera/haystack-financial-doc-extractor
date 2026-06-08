@@ -1,16 +1,21 @@
+# SPDX-FileCopyrightText: 2026 Ambreen Zaver, Callisto Tech
+# SPDX-License-Identifier: Apache-2.0
+
 """Unit tests for KvNormalizer — no Azure DI or DB required."""
 
 from decimal import Decimal
-import pytest
-from haystack_financial_doc_extractor.components.kv_normalizer import KvNormalizer
-from haystack_financial_doc_extractor.models.kv_entry import KvEntry
 
+import pytest
+
+from haystack_integrations.components.azure_di_financial.kv_normalizer import KvNormalizer
+from haystack_integrations.components.azure_di_financial.models.kv_entry import KvEntry
 
 FIELD_MAP = {
     "adjusted gross income": "agi",
     "wages salaries tips": "wages",
     "total tax": "total_tax",
 }
+
 
 def make_normalizer(**kwargs) -> KvNormalizer:
     return KvNormalizer(
@@ -25,6 +30,7 @@ def extraction(entries: list[KvEntry]) -> list[dict]:
     return [{"kv_entries": entries, "source_name": "test.pdf"}]
 
 
+@pytest.mark.unit
 class TestValueParsing:
     def test_plain_integer(self):
         norm = make_normalizer()
@@ -62,6 +68,7 @@ class TestValueParsing:
         assert result["fields"][0].extracted_value == Decimal("75000")
 
 
+@pytest.mark.unit
 class TestFieldNameResolution:
     def test_exact_match(self):
         norm = make_normalizer()
@@ -74,6 +81,7 @@ class TestFieldNameResolution:
         assert result["fields"][0].field_name == "other_income"
 
 
+@pytest.mark.unit
 class TestConfidenceFiltering:
     def test_low_confidence_entry_is_skipped(self):
         norm = make_normalizer(confidence_threshold=0.8)
@@ -86,6 +94,7 @@ class TestConfidenceFiltering:
         assert len(result["fields"]) == 1
 
 
+@pytest.mark.unit
 class TestNonNegativeFields:
     def test_parenthetical_treated_as_positive_for_non_negative_field(self):
         norm = KvNormalizer(
@@ -108,6 +117,7 @@ class TestNonNegativeFields:
         assert result["fields"][0].extracted_value == Decimal("-5000")
 
 
+@pytest.mark.unit
 class TestSectionAndMetadata:
     def test_section_is_attached(self):
         norm = make_normalizer()
@@ -118,3 +128,15 @@ class TestSectionAndMetadata:
         norm = make_normalizer()
         result = norm.run(extraction([KvEntry("adjusted gross income", "75000", Decimal("0.99"))]))
         assert result["fields"][0].source_doc_type == "IRS Form 1040"
+
+
+@pytest.mark.unit
+class TestSerialization:
+    def test_to_dict_round_trip(self):
+        norm = make_normalizer(confidence_threshold=0.7, non_negative_fields=["wages"])
+        d = norm.to_dict()
+        restored = KvNormalizer.from_dict(d)
+        assert restored.section == norm.section
+        assert restored.source_doc_type == norm.source_doc_type
+        assert float(restored.confidence_threshold) == pytest.approx(0.7)
+        assert "wages" in restored.non_negative_fields
