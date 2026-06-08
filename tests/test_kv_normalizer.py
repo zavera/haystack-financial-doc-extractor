@@ -80,6 +80,28 @@ class TestFieldNameResolution:
         result = norm.run(extraction([KvEntry("Other Income", "1000", Decimal("0.99"))]))
         assert result["fields"][0].field_name == "other_income"
 
+    def test_key_with_special_chars_matches_field_map(self):
+        """Azure DI raw keys contain punctuation — strip-and-match must still resolve."""
+        norm = KvNormalizer(
+            field_map={"subtract line 14 from line 11b if zero or less enter 0 this is your taxable income": "taxable_income"},
+            section="INCOME",
+            source_doc_type="IRS Form 1040",
+        )
+        raw_key = "Subtract line 14 from line 11b. If zero or less, enter -0-. This is your taxable income"
+        result = norm.run(extraction([KvEntry(raw_key, "11500", Decimal("0.60"))]))
+        assert result["fields"][0].field_name == "taxable_income"
+
+    def test_key_with_irregular_spacing_still_matches(self):
+        """Azure DI keys sometimes have double spaces — must collapse before lookup."""
+        norm = KvNormalizer(
+            field_map={"adjusted gross income": "agi"},
+            section="INCOME",
+            source_doc_type="IRS Form 1040",
+        )
+        raw_key = "Adjusted  Gross  Income"   # double spaces
+        result = norm.run(extraction([KvEntry(raw_key, "75000", Decimal("0.70"))]))
+        assert result["fields"][0].field_name == "agi"
+
 
 @pytest.mark.unit
 class TestConfidenceFiltering:

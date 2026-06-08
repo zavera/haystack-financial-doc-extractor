@@ -63,7 +63,8 @@ class KvNormalizer:
         confidence_threshold: float = 0.5,
         non_negative_fields: list[str] | None = None,
     ) -> None:
-        self.field_map = {k.lower(): v for k, v in field_map.items()}
+        # Normalise keys: lowercase + collapse any multi-space runs
+        self.field_map = {re.sub(r" +", " ", k.lower().strip()): v for k, v in field_map.items()}
         self.section = section
         self.source_doc_type = source_doc_type
         self.confidence_threshold = Decimal(str(confidence_threshold))
@@ -112,7 +113,9 @@ class KvNormalizer:
         lower = raw_key.lower().strip()
         if lower in self.field_map:
             return self.field_map[lower]
-        simplified = re.sub(r"[^a-z0-9 ]", "", lower).strip()
+        # Strip special chars then collapse any multi-space runs so lookup is
+        # robust against Azure DI keys with irregular internal spacing.
+        simplified = re.sub(r" +", " ", re.sub(r"[^a-z0-9 ]", "", lower)).strip()
         if simplified in self.field_map:
             return self.field_map[simplified]
         return re.sub(r"\s+", "_", simplified)
