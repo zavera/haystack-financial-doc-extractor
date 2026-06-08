@@ -8,10 +8,12 @@ on:
 
 jobs:
   unit-tests:
+    name: Unit tests (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11", "3.12"]
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
 
     steps:
       - uses: actions/checkout@v4
@@ -25,8 +27,36 @@ jobs:
         run: pip install hatch
 
       - name: Run unit tests
-        run: hatch run test:unit
+        # -m unit: only unit-marked tests — Azure integration tests are excluded
+        # Integration tests require live Azure DI credentials (AZURE_DI_ENDPOINT / AZURE_DI_KEY)
+        # and must be triggered manually: hatch run test:integration
+        run: hatch run test:unit -- --tb=short -q
 
-      - name: Upload coverage
-        if: matrix.python-version == '3.11'
-        run: hatch run test:cov
+  coverage:
+    name: Coverage (Python 3.12)
+    runs-on: ubuntu-latest
+    needs: unit-tests
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Hatch
+        run: pip install hatch
+
+      - name: Run unit tests with coverage
+        run: |
+          hatch run test:cov -- -m unit --tb=short -q \
+            --cov-report=term-missing \
+            --cov-report=xml:coverage.xml
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.xml
+          retention-days: 14
