@@ -1,16 +1,5 @@
-# Copyright 2026 Ambreen Zaver, Callisto Tech
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# SPDX-FileCopyrightText: 2026 Ambreen Zaver, Callisto Tech
+# SPDX-License-Identifier: Apache-2.0
 
 """
 KV normalizer component.
@@ -32,8 +21,8 @@ from typing import Any
 
 from haystack import component, default_from_dict, default_to_dict
 
-from ..models.extracted_field import ExtractedField
-from ..models.kv_entry import KvEntry
+from .models.extracted_field import ExtractedField
+from .models.kv_entry import KvEntry
 
 logger = logging.getLogger(__name__)
 
@@ -46,24 +35,24 @@ _BLANK_VALUES = {"n/a", "na", "none", "-", "", "not applicable"}
 
 @component
 class KvNormalizer:
-    """
-    Haystack component that normalises raw KV entries into typed ExtractedField objects.
+    """Haystack component that normalises raw KV entries into typed ExtractedField objects.
 
-    Field-name-to-canonical-name mapping is provided via `field_map`. If a key
-    from Azure DI does not match any entry in field_map, it is still emitted with
-    field_name equal to the lowercased, underscore-normalised raw key — nothing
+    Field-name-to-canonical-name mapping is provided via ``field_map``. If a key
+    from Azure DI does not match any entry in ``field_map``, it is still emitted with
+    ``field_name`` equal to the lowercased, underscore-normalised raw key — nothing
     is silently dropped.
 
     Args:
-        field_map: dict mapping Azure DI raw key patterns (lowercase) to canonical
-                   field names. Example:
-                   {"adjusted gross income": "agi", "wages salaries tips": "wages_hha"}
-        section: The SectionKey string this normalizer is scoped to
-                 (e.g. "HHA_INCOME"). Stored on every ExtractedField for
-                 downstream grouping.
-        source_doc_type: Human-readable document type label stored on every
-                         ExtractedField (e.g. "IRS Form 1040").
-        confidence_threshold: KvEntries below this confidence are logged and skipped.
+        field_map:            Dict mapping Azure DI raw key patterns (lowercase) to
+                              canonical field names.
+                              Example: ``{"adjusted gross income": "agi"}``
+        section:              The section label applied to all extracted fields
+                              (e.g. ``"HHA_INCOME"``).
+        source_doc_type:      Human-readable document type stored on every
+                              ExtractedField (e.g. ``"IRS Form 1040"``).
+        confidence_threshold: KvEntries below this confidence are skipped.
+        non_negative_fields:  Canonical field names where parenthetical notation
+                              means positive, not negative (e.g. W-2 box values).
     """
 
     def __init__(
@@ -78,16 +67,15 @@ class KvNormalizer:
         self.section = section
         self.source_doc_type = source_doc_type
         self.confidence_threshold = Decimal(str(confidence_threshold))
-        # Canonical field names where parenthetical notation means positive, not negative.
-        # E.g. W-2 box values are never negative even if printed in parens.
         self.non_negative_fields: set[str] = set(non_negative_fields or [])
 
     @component.output_types(fields=list[ExtractedField])
     def run(self, extractions: list[dict[str, Any]]) -> dict:
-        """
+        """Normalise raw KV extractions into typed ExtractedField objects.
+
         Args:
             extractions: Output list from AzureDiExtractor.run() —
-                         each item is a dict with "kv_entries" key.
+                         each item is a dict with a ``"kv_entries"`` key.
 
         Returns:
             fields: Flat list of ExtractedField across all input documents.
@@ -95,7 +83,6 @@ class KvNormalizer:
         all_fields: list[ExtractedField] = []
         for extraction in extractions:
             kv_entries: list[KvEntry] = extraction.get("kv_entries", [])
-            source_name: str = extraction.get("source_name", "unknown")
             for entry in kv_entries:
                 if entry.confidence < self.confidence_threshold:
                     logger.debug(
@@ -104,8 +91,7 @@ class KvNormalizer:
                         self.confidence_threshold,
                     )
                     continue
-                field = self._normalise_entry(entry)
-                all_fields.append(field)
+                all_fields.append(self._normalise_entry(entry))
         return {"fields": all_fields}
 
     def _normalise_entry(self, entry: KvEntry) -> ExtractedField:
@@ -146,7 +132,6 @@ class KvNormalizer:
 
         paren_match = _PARENS_NEGATIVE.match(stripped)
         working = paren_match.group(1) if paren_match else stripped
-        # Only treat parens as negative if the field permits it.
         negative = paren_match is not None and allow_negative
 
         working = _CURRENCY_STRIP.sub("", working)
