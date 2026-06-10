@@ -303,6 +303,45 @@ SectionKey.EXPENSES     # Expense documentation
 
 ---
 
+## Running integration tests
+
+Integration tests hit a live Azure DI endpoint and verify end-to-end extraction
+against the synthetic sample forms in `samples/`.
+
+```bash
+export AZURE_DI_ENDPOINT="https://<resource>.cognitiveservices.azure.com/"
+export AZURE_DI_KEY="<your-key>"
+
+# Unit tests only (no Azure credentials required)
+pytest -m unit -v
+
+# Integration tests (live Azure DI calls, ~2 min)
+pytest -m integration -v -s
+```
+
+Each integration test prints a one-line extraction summary:
+
+```
+✅ fw2_filled.pdf  form=W-2  stage=STAGE-0  kv=9
+✅ f1040_filled.pdf  form=1040  stage=STAGE-0  kv=14
+```
+
+| Field | Meaning |
+|---|---|
+| `form` | Inferred IRS form type (1040, W-2, Schedule C/E/K-1, 1065, 1120, 1120-S, unknown) |
+| `stage` | Recovery stage used (STAGE-0 = full doc, STAGE-1 = page split, STAGE-2 = DPI reduction, STAGE-3 = rotation) |
+| `kv` | Number of key-value pairs returned by Azure DI |
+
+Tests are split into three classes:
+
+| Class | Forms tested |
+|---|---|
+| `TestW2Live` | `fw2_filled.pdf`, `fw2_fake.pdf` — W-2 field extraction, confidence, delta scoring, section labels |
+| `TestForm1040Live` | `f1040_filled.pdf`, `f1040_fake.pdf` — 1040 field extraction |
+| `TestBatchLive` | Two documents in one `pipeline.run()` call, serialisation round-trip |
+
+---
+
 ## Running the example script
 
 ```bash

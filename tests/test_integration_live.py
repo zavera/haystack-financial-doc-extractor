@@ -76,16 +76,28 @@ def run_pipeline(pdf_path: Path, field_map: dict, endpoint: str, api_key: str,
         source_doc_type=pdf_path.stem,
         confidence_threshold=0.40,
     )
-    result = pipeline.run({
-        "ingest": {
-            "bytes_list":   [pdf_path.read_bytes()],
-            "document_ids": [pdf_path.stem],
-            "source_names": [pdf_path.name],
+    result = pipeline.run(
+        {
+            "ingest": {
+                "bytes_list":   [pdf_path.read_bytes()],
+                "document_ids": [pdf_path.stem],
+                "source_names": [pdf_path.name],
+            },
+            "delta": {
+                "reference_values": reference_values or {},
+            },
         },
-        "delta": {
-            "reference_values": reference_values or {},
-        },
-    })
+        include_outputs_from={"extractor"},
+    )
+    # Print llama-index style summary line
+    for ext in result.get("extractor", {}).get("extractions", []):
+        status = "✅" if not ext.get("error") else "❌"
+        print(
+            f"\n{status} {ext['source_name']}  "
+            f"form={ext['form_type']}  "
+            f"stage={ext['stage_used']}  "
+            f"kv={ext['kv_count']}"
+        )
     return result["delta"]["fields"]
 
 
