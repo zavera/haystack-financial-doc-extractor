@@ -50,6 +50,39 @@ _DEFAULT_PAGE_CHUNK_SIZE = 10
 _DEFAULT_MAX_WORKERS = 4
 
 
+def _infer_form_type(entries: list[KvEntry]) -> str:
+    """Heuristic form type detection from extracted key names."""
+    keys_lower = {e.key.lower() for e in entries}
+    if any("1040" in k for k in keys_lower):
+        return "1040"
+    if any("w-2" in k or "w2" in k or "employer" in k for k in keys_lower):
+        return "W-2"
+    if any("schedule c" in k or "profit or loss from business" in k for k in keys_lower):
+        return "Schedule C"
+    if any("schedule e" in k or "supplemental income" in k for k in keys_lower):
+        return "Schedule E"
+    if any("schedule k-1" in k or "partner's share" in k for k in keys_lower):
+        return "Schedule K-1"
+    if any("1065" in k for k in keys_lower):
+        return "1065"
+    if any("1120-s" in k for k in keys_lower):
+        return "1120-S"
+    if any("1120" in k for k in keys_lower):
+        return "1120"
+    return "unknown"
+
+
+def _retry_after_ms(exc: HttpResponseError) -> float | None:
+    """Parse Retry-After header (seconds) → seconds float."""
+    try:
+        header = exc.response.headers.get("Retry-After")
+        if header:
+            return float(header.strip())
+    except Exception:
+        pass
+    return None
+
+
 @component
 class AzureDiExtractor:
     """Haystack component that extracts raw KV pairs from financial PDFs using
@@ -202,58 +235,107 @@ class AzureDiExtractor:
             "metadata":       doc.metadata,
             "endpoint_index": client_index,
         }
+        start_ms = int(time.monotonic() * 1_000)
         try:
-            entries, stage = self._run_recovery_chain(doc.bytes_, client_index)
-            return {**base, "kv_entries": entries, "stage_used": stage, "error": None}
+            entries, stage, az_di_ms, di_calls = self._run_recovery_chain(doc.bytes_, client_index)
+            total_ms = int(time.monotonic() * 1_000) - start_ms
+            form_type = _infer_form_type(entries)
+            return {
+                **base,
+                "kv_entries":   entries,
+                "stage_used":   stage,
+                "form_type":    form_type,
+                "kv_count":     len(entries),
+                "di_calls":     di_calls,
+                "az_di_ms":     az_di_ms,
+                "total_ms":     total_ms,
+                "error":        None,
+            }
         except Exception as exc:
+            total_ms = int(time.monotonic() * 1_000) - start_ms
             logger.error("All recovery stages failed for document [id redacted]: %s", exc)
-            return {**base, "kv_entries": [], "stage_used": "ERROR", "error": str(exc)}
+            return {
+                **base,
+                "kv_entries":   [],
+                "stage_used":   "ERROR",
+                "form_type":    "unknown",
+                "kv_count":     0,
+                "di_calls":     0,
+                "az_di_ms":     0,
+                "total_ms":     total_ms,
+                "error":        str(exc),
+            }
 
-    def _run_recovery_chain(self, pdf_bytes: bytes, client_index: int) -> tuple[list[KvEntry], str]:
-        entries = self._analyze_bytes(pdf_bytes, client_index)
+    def _run_recovery_chain(
+        self, pdf_bytes: bytes, client_index: int
+    ) -> tuple[list[KvEntry], str, int, int]:
+        """Returns (entries, stage, az_di_ms, di_calls)."""
+        total_az_ms = 0
+        total_calls = 0
+
+        entries, az_ms, calls = self._analyze_bytes_timed(pdf_bytes, client_index)
+        total_az_ms += az_ms
+        total_calls += calls
         if entries:
-            return entries, "STAGE-0"
+            return entries, "STAGE-0", total_az_ms, total_calls
 
         logger.debug("Stage 0 returned empty — trying page splitter")
         chunks = self._split_pages(pdf_bytes)
-        entries = self._analyze_chunks_parallel(chunks, client_index)
+        entries, az_ms, calls = self._analyze_chunks_parallel_timed(chunks, client_index)
+        total_az_ms += az_ms
+        total_calls += calls
         if entries:
-            return entries, "STAGE-1"
+            return entries, "STAGE-1", total_az_ms, total_calls
 
         logger.debug("Stage 1 returned empty — trying DPI reduction")
         reduced = self._reduce_dpi(pdf_bytes)
-        entries = self._analyze_bytes(reduced, client_index)
+        entries, az_ms, calls = self._analyze_bytes_timed(reduced, client_index)
+        total_az_ms += az_ms
+        total_calls += calls
         if entries:
-            return entries, "STAGE-2"
+            return entries, "STAGE-2", total_az_ms, total_calls
 
         logger.debug("Stage 2 returned empty — trying rotation block")
         for degrees in _ROTATION_DEGREES:
             rotated = self._rotate_pdf(pdf_bytes, degrees)
-            entries = self._analyze_bytes(rotated, client_index)
+            entries, az_ms, calls = self._analyze_bytes_timed(rotated, client_index)
+            total_az_ms += az_ms
+            total_calls += calls
             if entries:
-                return entries, f"STAGE-3 ({degrees}deg)"
+                return entries, f"STAGE-3 ({degrees}deg)", total_az_ms, total_calls
 
-        return [], "EXHAUSTED"
+        return [], "EXHAUSTED", total_az_ms, total_calls
 
     # ------------------------------------------------------------------
     # Azure DI call with exponential backoff
     # ------------------------------------------------------------------
 
-    def _analyze_bytes(self, pdf_bytes: bytes, client_index: int) -> list[KvEntry]:
+    def _analyze_bytes_timed(
+        self, pdf_bytes: bytes, client_index: int
+    ) -> tuple[list[KvEntry], int, int]:
+        """Returns (entries, az_di_ms, di_calls)."""
         client = self._client(client_index)
-        delay  = _INITIAL_BACKOFF_S
+        delay = _INITIAL_BACKOFF_S
+        di_calls = 0
+        az_di_ms = 0
+
         for attempt in range(self.max_retries):
             try:
+                t0 = int(time.monotonic() * 1_000)
+                di_calls += 1
                 poller = client.begin_analyze_document(
                     self.model_id,
                     document=io.BytesIO(pdf_bytes),
                 )
                 result = poller.result(timeout=self.poll_timeout_seconds)
-                return self._to_kv_entries(result)
+                az_di_ms += int(time.monotonic() * 1_000) - t0
+                return self._to_kv_entries(result), az_di_ms, di_calls
             except HttpResponseError as exc:
                 if exc.status_code == 429:
-                    jitter     = delay * _JITTER_FACTOR * random.uniform(-1, 1)
-                    sleep_for  = min(delay + jitter, _MAX_BACKOFF_S)
+                    # Honor Retry-After header if present, else use backoff
+                    retry_after = _retry_after_ms(exc)
+                    jitter = delay * _JITTER_FACTOR * random.uniform(-1, 1)
+                    sleep_for = retry_after if retry_after is not None else min(delay + jitter, _MAX_BACKOFF_S)
                     logger.warning(
                         "Azure DI rate limited on endpoint %d (attempt %d). Sleeping %.1fs",
                         client_index, attempt + 1, sleep_for,
@@ -262,11 +344,16 @@ class AzureDiExtractor:
                     delay = min(delay * 2, _MAX_BACKOFF_S)
                 elif exc.status_code == 403:
                     logger.error("Azure DI quota exhausted on endpoint %d (403).", client_index)
-                    return []
+                    return [], az_di_ms, di_calls
                 else:
                     raise
         logger.error("Azure DI max retries (%d) exceeded on endpoint %d.", self.max_retries, client_index)
-        return []
+        return [], az_di_ms, di_calls
+
+    def _analyze_bytes(self, pdf_bytes: bytes, client_index: int) -> list[KvEntry]:
+        """Backward-compatible wrapper (used by parallel chunk analysis)."""
+        entries, _, _ = self._analyze_bytes_timed(pdf_bytes, client_index)
+        return entries
 
     @staticmethod
     def _to_kv_entries(result: Any) -> list[KvEntry]:
@@ -300,13 +387,27 @@ class AzureDiExtractor:
         return chunks
 
     def _analyze_chunks_parallel(self, chunks: list[bytes], client_index: int) -> list[KvEntry]:
-        """Analyse page chunks in parallel, all on the same endpoint as the parent doc."""
-        entries: list[KvEntry] = []
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            futures = [executor.submit(self._analyze_bytes, chunk, client_index) for chunk in chunks]
-            for future in as_completed(futures):
-                entries.extend(future.result())
+        entries, _, _ = self._analyze_chunks_parallel_timed(chunks, client_index)
         return entries
+
+    def _analyze_chunks_parallel_timed(
+        self, chunks: list[bytes], client_index: int
+    ) -> tuple[list[KvEntry], int, int]:
+        """Analyse page chunks in parallel. Returns (entries, az_di_ms, di_calls)."""
+        entries: list[KvEntry] = []
+        total_az_ms = 0
+        total_calls = 0
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            futures = [
+                executor.submit(self._analyze_bytes_timed, chunk, client_index)
+                for chunk in chunks
+            ]
+            for future in as_completed(futures):
+                chunk_entries, az_ms, calls = future.result()
+                entries.extend(chunk_entries)
+                total_az_ms += az_ms
+                total_calls += calls
+        return entries, total_az_ms, total_calls
 
     @staticmethod
     def _reduce_dpi(pdf_bytes: bytes) -> bytes:
