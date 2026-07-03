@@ -8,9 +8,11 @@ Pre-wired Haystack pipeline for financial document KV extraction.
 
     BytesIngestionComponent
             |
-    DocumentTranslationComponent  (optional — non-English documents only)
+    AzureDiExtractor  (single endpoint or multi-endpoint pool;
+                        translates non-English documents to English
+                        via Azure OpenAI when configured)
             |
-    AzureDiExtractor  (single endpoint or multi-endpoint pool)
+    IrsFormClassifier  (optional — classifies IRS form type(s) via Azure OpenAI)
             |
     KvNormalizer
             |
@@ -41,15 +43,32 @@ Multi-endpoint usage (scales TPS quota linearly)::
         max_workers=8,  # recommended: len(endpoints) * 4
     )
 
-With translation enabled (detects non-English documents, translates to English
-before extraction)::
+With translation enabled — detects each document's language via Azure DI's own
+``result.languages``; non-English documents are translated to English through
+Azure OpenAI and re-analyzed so extracted fields match an English field_map::
 
     pipeline = build_pipeline(
         azure_endpoint="https://<resource>.cognitiveservices.azure.com/",
         azure_api_key="...",
-        translation_model="gpt-4o-mini",
-        translation_endpoint="https://api.openai.com/v1",
+        translation_azure_endpoint="https://<openai-resource>.openai.azure.com/",
+        translation_azure_deployment="gpt-4o-mini",
         translation_api_key="...",
+        field_map={"amount from line 11a adjusted gross income": "agi"},
+        section="INCOME",
+        source_doc_type="IRS Form 1040",
+    )
+
+With IRS form classification enabled — every document's extracted content is
+classified by IRS form type(s) via one batched Azure OpenAI call, populating
+``form_types`` on each extraction (a document can contain more than one form,
+e.g. a bundled Schedule C + Schedule SE upload)::
+
+    pipeline = build_pipeline(
+        azure_endpoint="https://<resource>.cognitiveservices.azure.com/",
+        azure_api_key="...",
+        classification_azure_endpoint="https://<openai-resource>.openai.azure.com/",
+        classification_azure_deployment="gpt-4o-mini",
+        classification_api_key="...",
         field_map={"amount from line 11a adjusted gross income": "agi"},
         section="INCOME",
         source_doc_type="IRS Form 1040",
@@ -76,8 +95,8 @@ from haystack import Pipeline
 from .azure_di_extractor import AzureDiExtractor
 from .delta_calculator import DeltaCalculator
 from .document_ingestion import BytesIngestionComponent
+from .irs_form_classifier import IrsFormClassifier
 from .kv_normalizer import KvNormalizer
-from .translation import DocumentTranslationComponent
 
 
 def build_pipeline(
@@ -89,11 +108,19 @@ def build_pipeline(
     azure_api_key: str | None = None,
     # Multi-endpoint pool (load distribution)
     azure_endpoints: list[dict[str, str]] | None = None,
-    # Translation (optional) — detects non-English documents and translates
-    # them to English before AzureDiExtractor runs.
-    translation_model: str | None = None,
-    translation_endpoint: str | None = None,
+    # Translation (optional) — Azure OpenAI. Detects non-English documents via
+    # Azure DI's own language detection and translates them to English before
+    # the final extraction.
+    translation_azure_endpoint: str | None = None,
+    translation_azure_deployment: str | None = None,
     translation_api_key: str | None = None,
+    translation_api_version: str | None = None,
+    # IRS form classification (optional) — Azure OpenAI. Classifies every
+    # document's IRS form type(s) in one batched call.
+    classification_azure_endpoint: str | None = None,
+    classification_azure_deployment: str | None = None,
+    classification_api_key: str | None = None,
+    classification_api_version: str | None = None,
     # Shared config
     model_id: str = "prebuilt-document",
     confidence_threshold: float = 0.5,
@@ -115,12 +142,19 @@ def build_pipeline(
         azure_endpoints:        List of ``{"endpoint": ..., "api_key": ...}`` dicts.
                                 Overrides ``azure_endpoint``/``azure_api_key``.
                                 Each additional endpoint multiplies effective TPS quota.
-        translation_model:      Chat-completion model for pre-extraction translation
-                                (e.g. ``"gpt-4o-mini"``). Provide together with
-                                ``translation_endpoint``/``translation_api_key`` to
-                                enable the language-detection + translation stage.
-        translation_endpoint:   Base URL of the AI endpoint (OpenAI-compatible).
-        translation_api_key:    API key for the translation endpoint.
+        translation_azure_endpoint:   Azure OpenAI resource endpoint. Provide together
+                                with ``translation_azure_deployment``/``translation_api_key``
+                                to enable non-English -> English translation inside
+                                ``AzureDiExtractor``.
+        translation_azure_deployment: Azure OpenAI chat-completion deployment name.
+        translation_api_key:    API key for the Azure OpenAI translation resource.
+        translation_api_version: Azure OpenAI API version for translation (optional).
+        classification_azure_endpoint:   Azure OpenAI resource endpoint. Provide together
+                                with ``classification_azure_deployment``/``classification_api_key``
+                                to enable the ``IrsFormClassifier`` stage.
+        classification_azure_deployment: Azure OpenAI chat-completion deployment name.
+        classification_api_key: API key for the Azure OpenAI classification resource.
+        classification_api_version: Azure OpenAI API version for classification (optional).
         model_id:               Azure DI model. Default: ``prebuilt-document``.
         confidence_threshold:   Drop KV entries below this confidence. Default: 0.5.
         high_threshold:         Delta >= this -> HIGH severity. Default: 500.
@@ -157,6 +191,10 @@ def build_pipeline(
             max_retries=max_retries,
             poll_timeout_seconds=poll_timeout_seconds,
             page_chunk_size=page_chunk_size,
+            translation_azure_endpoint=translation_azure_endpoint,
+            translation_azure_deployment=translation_azure_deployment,
+            translation_api_key=translation_api_key,
+            translation_api_version=translation_api_version,
         ),
     )
     pipeline.add_component(
@@ -173,22 +211,26 @@ def build_pipeline(
         DeltaCalculator(high_threshold=high_threshold, medium_threshold=medium_threshold),
     )
 
-    translation_enabled = bool(translation_model and translation_endpoint and translation_api_key)
-    if translation_enabled:
+    pipeline.connect("ingest.documents", "extractor.documents")
+
+    classification_enabled = bool(
+        classification_azure_endpoint and classification_azure_deployment and classification_api_key
+    )
+    if classification_enabled:
         pipeline.add_component(
-            "translate",
-            DocumentTranslationComponent(
-                model=translation_model,
-                endpoint=translation_endpoint,
-                api_key=translation_api_key,
+            "classify",
+            IrsFormClassifier(
+                azure_endpoint=classification_azure_endpoint,
+                azure_deployment=classification_azure_deployment,
+                api_key=classification_api_key,
+                api_version=classification_api_version,
             ),
         )
-        pipeline.connect("ingest.documents", "translate.documents")
-        pipeline.connect("translate.documents", "extractor.documents")
+        pipeline.connect("extractor.extractions", "classify.extractions")
+        pipeline.connect("classify.extractions", "normalizer.extractions")
     else:
-        pipeline.connect("ingest.documents", "extractor.documents")
+        pipeline.connect("extractor.extractions", "normalizer.extractions")
 
-    pipeline.connect("extractor.extractions", "normalizer.extractions")
     pipeline.connect("normalizer.fields", "delta.fields")
 
     return pipeline

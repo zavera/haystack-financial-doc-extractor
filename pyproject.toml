@@ -32,8 +32,6 @@ dependencies = [
     "azure-ai-formrecognizer>=3.3.0",
     "pikepdf>=8.0.0",
     "pydantic>=2.0.0",
-    "langdetect>=1.0.9",
-    "pypdf>=4.0.0",
     "reportlab>=4.0.0",
 ]
 
@@ -67,8 +65,6 @@ dependencies = [
     "haystack-ai>=2.0.0",
     "azure-ai-formrecognizer>=3.3.0",
     "pikepdf>=8.0.0",
-    "langdetect>=1.0.9",
-    "pypdf>=4.0.0",
     "reportlab>=4.0.0",
 ]
 

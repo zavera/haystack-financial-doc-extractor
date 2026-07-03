@@ -25,6 +25,12 @@ value that must round-trip to `Decimal` without loss. This package handles:
 - **Financial string normalization** — `$75,000`, `(12,500)`, `75000 USD`, `N/A`, `12.5%`
 - **Non-negative field protection** — W-2 box values printed in parens are positive, not negative
 - **Delta + severity scoring** — HIGH / MEDIUM / LOW against a reference value dict
+- **Optional translation via Azure OpenAI** — Azure DI's own language detection flags
+  non-English documents, which are translated to English and re-analyzed so
+  extracted fields still match your (English) `field_map`
+- **Optional IRS form classification via Azure OpenAI** — classifies every distinct
+  IRS form type present in a document's content, including bundled multi-form
+  uploads (e.g. Schedule C immediately followed by Schedule SE)
 - **Privacy-conscious by design** — no PII in logs, opaque document IDs, stateless per-document processing
 
 ---
@@ -45,9 +51,13 @@ Requires Python 3.10+.
 |---|---|---|
 | `BytesIngestionComponent` | `bytes_list`, `document_ids`, `source_names` | `list[DocumentPayload]` |
 | `DocumentIngestionComponent` | `document_ids` (stub — implement for your DMS) | `list[DocumentPayload]` |
-| `AzureDiExtractor` | `list[DocumentPayload]` | `list[dict]` with `kv_entries` |
-| `KvNormalizer` | `list[dict]` from extractor | `list[ExtractedField]` |
+| `AzureDiExtractor` | `list[DocumentPayload]` | `list[dict]` with `kv_entries`, `content`, `language` (translates + re-analyzes non-English documents when configured) |
+| `IrsFormClassifier` (optional) | `list[dict]` from extractor | Same list, each dict augmented with `form_types` |
+| `KvNormalizer` | `list[dict]` from extractor/classifier | `list[ExtractedField]` |
 | `DeltaCalculator` | `list[ExtractedField]` + `reference_values` | `list[ExtractedField]` with delta + severity |
+
+`get_kv_pairs(extraction)` / `get_content(extraction)` read `kv_entries`/`content`
+off an extraction dict without depending on its exact shape.
 
 ---
 
@@ -285,6 +295,60 @@ build_pipeline(..., section="INCOME", ...)         # income-statement fields
 build_pipeline(..., section="EXPENSES", ...)        # deductible expense fields
 build_pipeline(..., section="ASSETS", ...)          # balance-sheet / asset fields
 build_pipeline(..., section="CLIENT_A_2023", ...)   # per-client, per-year batches
+```
+
+---
+
+## Translation & IRS form classification (optional, Azure OpenAI)
+
+Both features are opt-in — provide the corresponding `*_azure_endpoint` /
+`*_azure_deployment` / `*_api_key` args to `build_pipeline()` or omit them
+entirely for the default Azure-DI-only behavior.
+
+**Translation** lives inside `AzureDiExtractor` itself, not as a separate
+pipeline stage. Azure DI's `AnalyzeResult` already reports the detected
+document language (`result.languages`) from the very same call that returns
+`content`/`kv_entries` — no separate OCR or language-detection pass is needed.
+When a document isn't English, its content is sent to Azure OpenAI for
+translation, repackaged into a PDF, and re-analyzed so the final
+`kv_entries`/`content` are English and still match an English `field_map`:
+
+```python
+pipeline = build_pipeline(
+    azure_endpoint="https://<resource>.cognitiveservices.azure.com/",
+    azure_api_key="...",
+    translation_azure_endpoint="https://<openai-resource>.openai.azure.com/",
+    translation_azure_deployment="gpt-4o-mini",
+    translation_api_key="...",
+    field_map=FIELD_MAP_1040,
+    section="INCOME",
+    source_doc_type="IRS Form 1040",
+)
+```
+
+**IRS form classification** runs as its own pipeline stage (`IrsFormClassifier`),
+between `AzureDiExtractor` and `KvNormalizer`. All documents in a batch are
+classified in a single Azure OpenAI call — a document's content can contain
+more than one distinct IRS form (e.g. a bundled Schedule C immediately followed
+by a Schedule SE on the same upload), so each extraction is augmented with a
+`form_types: list[str]` field rather than a single label:
+
+```python
+pipeline = build_pipeline(
+    azure_endpoint="https://<resource>.cognitiveservices.azure.com/",
+    azure_api_key="...",
+    classification_azure_endpoint="https://<openai-resource>.openai.azure.com/",
+    classification_azure_deployment="gpt-4o-mini",
+    classification_api_key="...",
+    field_map=FIELD_MAP_1040,
+    section="INCOME",
+    source_doc_type="IRS Form 1040",
+)
+
+result = pipeline.run({...}, include_outputs_from={"classify"})
+for extraction in result["classify"]["extractions"]:
+    print(extraction["source_name"], extraction["form_types"])
+    # e.g. "bundle.pdf" -> ["Schedule C", "Schedule SE"]
 ```
 
 ---

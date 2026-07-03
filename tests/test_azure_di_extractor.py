@@ -263,10 +263,18 @@ def _mock_pair(key: str, value: str, confidence: float = 0.9) -> MagicMock:
     return pair
 
 
-def _mock_analyze_result(content: str | None, pairs: list) -> MagicMock:
+def _mock_language(locale: str, confidence: float = 0.95) -> MagicMock:
+    language = MagicMock()
+    language.locale = locale
+    language.confidence = confidence
+    return language
+
+
+def _mock_analyze_result(content: str | None, pairs: list, languages: list | None = None) -> MagicMock:
     result = MagicMock()
     result.content = content
     result.key_value_pairs = pairs
+    result.languages = languages if languages is not None else []
     return result
 
 
@@ -304,3 +312,88 @@ class TestContentExtraction:
     def test_get_kv_pairs_and_get_content_default_to_empty(self):
         assert get_kv_pairs({}) == []
         assert get_content({}) == ""
+
+    def test_get_language_defaults_to_en_when_undetected(self):
+        result = _mock_analyze_result("some text", [])
+        assert AzureDiExtractor._get_language(result) == "en"
+
+    def test_get_language_picks_highest_confidence_locale(self):
+        result = _mock_analyze_result(
+            "texto",
+            [],
+            languages=[_mock_language("en", confidence=0.3), _mock_language("es", confidence=0.9)],
+        )
+        assert AzureDiExtractor._get_language(result) == "es"
+
+
+# ---------------------------------------------------------------------------
+# Translation — folded into AzureDiExtractor, driven by Azure DI's own
+# result.languages (no langdetect/pypdf, no separate pipeline stage)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.unit
+class TestTranslation:
+
+    def _extractor_with_translation(self) -> AzureDiExtractor:
+        with (
+            patch("haystack_integrations.components.azure_di_financial.azure_di_extractor.DocumentAnalysisClient"),
+            patch("haystack_integrations.components.azure_di_financial.azure_di_extractor.AzureOpenAIGenerator"),
+        ):
+            return AzureDiExtractor(
+                endpoint=FAKE_ENDPOINT_1,
+                api_key=FAKE_KEY_1,
+                translation_azure_endpoint="https://fake-openai.openai.azure.com/",
+                translation_azure_deployment="fake-deployment",
+                translation_api_key="fake-key",
+            )
+
+    def test_translation_disabled_by_default(self):
+        ext = make_extractor(endpoint=FAKE_ENDPOINT_1, api_key=FAKE_KEY_1)
+        assert ext._translation_enabled is False
+
+    def test_translation_enabled_when_fully_configured(self):
+        ext = self._extractor_with_translation()
+        assert ext._translation_enabled is True
+
+    def test_english_document_is_not_translated(self):
+        ext = self._extractor_with_translation()
+        ext._translation_generator.run = MagicMock(side_effect=AssertionError("should not be called"))
+
+        english_result = _mock_analyze_result(
+            "Wages: 50000", [_mock_pair("Wages", "50000")], languages=[_mock_language("en")]
+        )
+        fake_poller = MagicMock()
+        fake_poller.result.return_value = english_result
+        ext._clients[0].begin_analyze_document = MagicMock(return_value=fake_poller)
+
+        doc = DocumentPayload(bytes_=b"%PDF-fake%", document_id="doc-1", source_name="w2.pdf")
+        extraction = ext.run([doc])["extractions"][0]
+
+        assert extraction["language"] == "en"
+        assert extraction["translated"] is False
+        assert extraction["content"] == "Wages: 50000"
+
+    def test_non_english_document_is_translated_and_reextracted(self):
+        ext = self._extractor_with_translation()
+        ext._translation_generator.run = MagicMock(return_value={"replies": ["Wages: 50000"]})
+
+        spanish_result = _mock_analyze_result(
+            "Salarios: 50000", [_mock_pair("Salarios", "50000")], languages=[_mock_language("es")]
+        )
+        translated_result = _mock_analyze_result(
+            "Wages: 50000", [_mock_pair("Wages", "50000")], languages=[_mock_language("en")]
+        )
+        fake_poller_1, fake_poller_2 = MagicMock(), MagicMock()
+        fake_poller_1.result.return_value = spanish_result
+        fake_poller_2.result.return_value = translated_result
+        ext._clients[0].begin_analyze_document = MagicMock(side_effect=[fake_poller_1, fake_poller_2])
+
+        doc = DocumentPayload(bytes_=b"%PDF-fake%", document_id="doc-1", source_name="w2.pdf")
+        extraction = ext.run([doc])["extractions"][0]
+
+        ext._translation_generator.run.assert_called_once()
+        assert extraction["language"] == "es"
+        assert extraction["translated"] is True
+        assert extraction["content"] == "Wages: 50000"
+        assert extraction["stage_used"] == "STAGE-0+TRANSLATED"
+        assert get_kv_pairs(extraction)[0].key == "Wages"

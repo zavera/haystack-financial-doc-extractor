@@ -82,7 +82,7 @@ class KvNormalizer:
                               whitespace and punctuation tolerance.
                               Example: ``{"wages, tips, other compensation": "wages"}``
         section:              The section label applied to all extracted fields
-                              (e.g. ``"HHA_INCOME"``).
+                              (e.g. ``"INCOME"``).
         source_doc_type:      Human-readable document type stored on every
                               ExtractedField (e.g. ``"IRS Form W-2"``).
         confidence_threshold: KvEntries below this confidence are skipped.

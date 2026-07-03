@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Azure Document Intelligence extractor with 4-stage recovery chain
-and multi-endpoint load distribution.
+Azure Document Intelligence extractor with 4-stage recovery chain,
+multi-endpoint load distribution, and optional Azure OpenAI translation.
 
 Stage 0 — Full document: submit raw bytes to Azure DI.
 Stage 1 — Page splitter: chunk PDF into pages, submit in parallel.
@@ -15,6 +15,14 @@ to distribute load across TPS quotas. Clients are selected per-document using
 round-robin to spread requests evenly.
 
 Rate limiting: exponential backoff with +/-20% jitter on 429 responses.
+
+Translation (optional): Azure DI's AnalyzeResult already reports the detected
+document language (``result.languages``) from the same call that returns
+``content`` and ``key_value_pairs`` — no separate OCR/detection pass needed.
+When translation is configured and a document isn't English, its content is
+sent to Azure OpenAI for translation, repackaged into a PDF, and re-analyzed
+so the final ``kv_entries``/``content`` are English — matching an English
+``field_map`` in KvNormalizer regardless of the source document's language.
 
 All tuneable parameters (max_workers, max_retries, poll_timeout_seconds,
 page_chunk_size) are explicit constructor args — configure them per deployment.
@@ -35,6 +43,10 @@ from azure.ai.formrecognizer import DocumentAnalysisClient
 from azure.core.credentials import AzureKeyCredential
 from azure.core.exceptions import HttpResponseError
 from haystack import component, default_from_dict, default_to_dict
+from haystack.components.generators.azure import AzureOpenAIGenerator
+from haystack.utils import Secret
+from reportlab.lib.pagesizes import LETTER
+from reportlab.pdfgen import canvas
 
 from .document_ingestion import DocumentPayload
 from .models.kv_entry import KvEntry
@@ -48,6 +60,15 @@ _JITTER_FACTOR = 0.2
 _ROTATION_DEGREES = [0, 90, 180, 270]
 _DEFAULT_PAGE_CHUNK_SIZE = 10
 _DEFAULT_MAX_WORKERS = 4
+
+_TRANSLATE_PROMPT = (
+    "Translate the following document text into English. Preserve line "
+    "breaks, labels, and numeric values exactly as written. Return only the "
+    "translated text, with no commentary.\n\n{text}"
+)
+_LINE_WIDTH = 100
+_PAGE_MARGIN = 40
+_LINE_HEIGHT = 14
 
 
 def _infer_form_type(entries: list[KvEntry]) -> str:
@@ -83,10 +104,30 @@ def _retry_after_ms(exc: HttpResponseError) -> float | None:
     return None
 
 
+def _wrap(text: str, width: int) -> list[str]:
+    """Word-wrap without dropping characters (unlike naive truncation)."""
+    if not text:
+        return [""]
+    words = text.split(" ")
+    lines: list[str] = []
+    current = ""
+    for word in words:
+        candidate = f"{current} {word}".strip()
+        if len(candidate) > width and current:
+            lines.append(current)
+            current = word
+        else:
+            current = candidate
+    lines.append(current)
+    return lines
+
+
 @component
 class AzureDiExtractor:
     """Haystack component that extracts raw KV pairs from financial PDFs using
-    Azure Document Intelligence with a 4-stage recovery chain.
+    Azure Document Intelligence with a 4-stage recovery chain, and optionally
+    translates non-English documents to English via Azure OpenAI before the
+    final extraction.
 
     Supports a **pool of Azure DI endpoints** for load distribution — provision
     multiple Azure DI resources and pass all endpoints to multiply effective TPS
@@ -109,6 +150,19 @@ class AzureDiExtractor:
             max_workers=8,   # scale workers with endpoint count
         )
 
+    With translation enabled — detects each document's language via Azure DI's
+    own ``result.languages``; non-English documents are translated to English
+    through Azure OpenAI and re-analyzed so ``kv_entries``/``content`` end up
+    English::
+
+        AzureDiExtractor(
+            endpoint="https://my-resource.cognitiveservices.azure.com/",
+            api_key="...",
+            translation_azure_endpoint="https://my-openai-resource.openai.azure.com/",
+            translation_azure_deployment="gpt-4o-mini",
+            translation_api_key="...",
+        )
+
     Args:
         endpoint:             Single Azure DI endpoint URL. Use this OR ``endpoints``.
         api_key:              API key for the single endpoint.
@@ -122,6 +176,13 @@ class AzureDiExtractor:
         max_workers:          Thread pool size for parallel document and chunk processing.
                               Default: 4. Recommended: set to ``len(endpoints) * 4``
                               under load.
+        translation_azure_endpoint:   Azure OpenAI resource endpoint. Provide together
+                              with ``translation_azure_deployment``/``translation_api_key``
+                              to enable non-English → English translation.
+        translation_azure_deployment: Azure OpenAI chat-completion deployment name.
+        translation_api_key:  API key for the Azure OpenAI resource.
+        translation_api_version: Azure OpenAI API version. Defaults to the Haystack
+                              client default when not set.
     """
 
     def __init__(
@@ -134,6 +195,10 @@ class AzureDiExtractor:
         max_retries: int = _MAX_RETRIES,
         poll_timeout_seconds: int = 120,
         max_workers: int = _DEFAULT_MAX_WORKERS,
+        translation_azure_endpoint: str | None = None,
+        translation_azure_deployment: str | None = None,
+        translation_api_key: str | None = None,
+        translation_api_version: str | None = None,
     ) -> None:
         # Validate — must supply either endpoint+api_key or endpoints list
         if endpoints:
@@ -170,10 +235,29 @@ class AzureDiExtractor:
         self._rr_lock    = threading.Lock()
         self._rr_counter = itertools.cycle(range(len(self._clients)))
 
+        # Optional Azure OpenAI translation
+        self.translation_azure_endpoint   = translation_azure_endpoint
+        self.translation_azure_deployment = translation_azure_deployment
+        self.translation_api_key          = translation_api_key
+        self.translation_api_version      = translation_api_version
+        self._translation_enabled = bool(
+            translation_azure_endpoint and translation_azure_deployment and translation_api_key
+        )
+        self._translation_generator: AzureOpenAIGenerator | None = None
+        if self._translation_enabled:
+            generator_kwargs: dict[str, Any] = {
+                "azure_endpoint": translation_azure_endpoint,
+                "azure_deployment": translation_azure_deployment,
+                "api_key": Secret.from_token(translation_api_key),
+            }
+            if translation_api_version:
+                generator_kwargs["api_version"] = translation_api_version
+            self._translation_generator = AzureOpenAIGenerator(**generator_kwargs)
+
         n = len(self._clients)
         logger.info(
-            "AzureDiExtractor initialised — %d endpoint(s), max_workers=%d, model=%s",
-            n, self.max_workers, self.model_id,
+            "AzureDiExtractor initialised — %d endpoint(s), max_workers=%d, model=%s, translation=%s",
+            n, self.max_workers, self.model_id, self._translation_enabled,
         )
 
     # ------------------------------------------------------------------
@@ -199,13 +283,15 @@ class AzureDiExtractor:
                     "metadata":    dict,
                     "kv_entries":  list[KvEntry],
                     "content":     str,   # full document text from Azure DI's AnalyzeResult
-                    "stage_used":  str,   # STAGE-0|STAGE-1|STAGE-2|STAGE-3|ERROR
+                    "language":    str,   # detected language locale, e.g. "en", "es"
+                    "translated":  bool,  # True if non-English content was translated
+                    "stage_used":  str,   # STAGE-0|STAGE-1|STAGE-2|STAGE-3|ERROR (+TRANSLATED)
                     "error":       str | None,
                     "endpoint_index": int,  # which pool slot handled this doc
                 }
 
-            Use :func:`get_kv_pairs` / :func:`get_content` to read these two
-            fields off an extraction dict without depending on its exact shape.
+            Use :func:`get_kv_pairs` / :func:`get_content` to read the two most
+            common fields off an extraction dict without depending on its exact shape.
         """
         results = []
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
@@ -229,7 +315,7 @@ class AzureDiExtractor:
         return self._clients[index % len(self._clients)]
 
     # ------------------------------------------------------------------
-    # Recovery chain
+    # Recovery chain + optional translation
     # ------------------------------------------------------------------
 
     def _extract_with_recovery(self, doc: DocumentPayload, client_index: int) -> dict:
@@ -241,13 +327,39 @@ class AzureDiExtractor:
         }
         start_ms = int(time.monotonic() * 1_000)
         try:
-            entries, content, stage, az_di_ms, di_calls = self._run_recovery_chain(doc.bytes_, client_index)
+            entries, content, language, stage, az_di_ms, di_calls = self._run_recovery_chain(
+                doc.bytes_, client_index
+            )
+            translated = False
+
+            if self._translation_enabled and language != "en" and content.strip():
+                logger.info(
+                    "Document language detected as '%s' — translating to English before re-extraction",
+                    language,
+                )
+                translated_bytes = self._to_pdf_bytes(self._translate(content))
+                t_entries, t_content, _, t_az_ms, t_calls = self._analyze_bytes_timed(
+                    translated_bytes, client_index
+                )
+                az_di_ms += t_az_ms
+                di_calls += t_calls
+                if t_entries or t_content:
+                    entries, content, stage = t_entries, t_content, f"{stage}+TRANSLATED"
+                    translated = True
+                else:
+                    logger.warning(
+                        "Re-extraction on translated document returned nothing — "
+                        "keeping original-language result"
+                    )
+
             total_ms = int(time.monotonic() * 1_000) - start_ms
             form_type = _infer_form_type(entries)
             return {
                 **base,
                 "kv_entries":   entries,
                 "content":      content,
+                "language":     language,
+                "translated":   translated,
                 "stage_used":   stage,
                 "form_type":    form_type,
                 "kv_count":     len(entries),
@@ -263,6 +375,8 @@ class AzureDiExtractor:
                 **base,
                 "kv_entries":   [],
                 "content":      "",
+                "language":     "en",
+                "translated":   False,
                 "stage_used":   "ERROR",
                 "form_type":    "unknown",
                 "kv_count":     0,
@@ -274,48 +388,80 @@ class AzureDiExtractor:
 
     def _run_recovery_chain(
         self, pdf_bytes: bytes, client_index: int
-    ) -> tuple[list[KvEntry], str, str, int, int]:
-        """Returns (entries, content, stage, az_di_ms, di_calls)."""
+    ) -> tuple[list[KvEntry], str, str, str, int, int]:
+        """Returns (entries, content, language, stage, az_di_ms, di_calls)."""
         total_az_ms = 0
         total_calls = 0
         last_content = ""
+        last_language = "en"
 
-        entries, content, az_ms, calls = self._analyze_bytes_timed(pdf_bytes, client_index)
+        entries, content, language, az_ms, calls = self._analyze_bytes_timed(pdf_bytes, client_index)
         total_az_ms += az_ms
         total_calls += calls
         last_content = content or last_content
+        last_language = language or last_language
         if entries:
-            return entries, content, "STAGE-0", total_az_ms, total_calls
+            return entries, content, language, "STAGE-0", total_az_ms, total_calls
 
         logger.debug("Stage 0 returned empty — trying page splitter")
         chunks = self._split_pages(pdf_bytes)
-        entries, content, az_ms, calls = self._analyze_chunks_parallel_timed(chunks, client_index)
+        entries, content, language, az_ms, calls = self._analyze_chunks_parallel_timed(chunks, client_index)
         total_az_ms += az_ms
         total_calls += calls
         last_content = content or last_content
+        last_language = language or last_language
         if entries:
-            return entries, content, "STAGE-1", total_az_ms, total_calls
+            return entries, content, language, "STAGE-1", total_az_ms, total_calls
 
         logger.debug("Stage 1 returned empty — trying DPI reduction")
         reduced = self._reduce_dpi(pdf_bytes)
-        entries, content, az_ms, calls = self._analyze_bytes_timed(reduced, client_index)
+        entries, content, language, az_ms, calls = self._analyze_bytes_timed(reduced, client_index)
         total_az_ms += az_ms
         total_calls += calls
         last_content = content or last_content
+        last_language = language or last_language
         if entries:
-            return entries, content, "STAGE-2", total_az_ms, total_calls
+            return entries, content, language, "STAGE-2", total_az_ms, total_calls
 
         logger.debug("Stage 2 returned empty — trying rotation block")
         for degrees in _ROTATION_DEGREES:
             rotated = self._rotate_pdf(pdf_bytes, degrees)
-            entries, content, az_ms, calls = self._analyze_bytes_timed(rotated, client_index)
+            entries, content, language, az_ms, calls = self._analyze_bytes_timed(rotated, client_index)
             total_az_ms += az_ms
             total_calls += calls
             last_content = content or last_content
+            last_language = language or last_language
             if entries:
-                return entries, content, f"STAGE-3 ({degrees}deg)", total_az_ms, total_calls
+                return entries, content, language, f"STAGE-3 ({degrees}deg)", total_az_ms, total_calls
 
-        return [], last_content, "EXHAUSTED", total_az_ms, total_calls
+        return [], last_content, last_language, "EXHAUSTED", total_az_ms, total_calls
+
+    # ------------------------------------------------------------------
+    # Translation (Azure OpenAI)
+    # ------------------------------------------------------------------
+
+    def _translate(self, text: str) -> str:
+        result = self._translation_generator.run(prompt=_TRANSLATE_PROMPT.format(text=text))
+        return result["replies"][0]
+
+    @staticmethod
+    def _to_pdf_bytes(text: str) -> bytes:
+        """Reflow translated text into a simple PDF for re-analysis by Azure DI."""
+        buf = io.BytesIO()
+        c = canvas.Canvas(buf, pagesize=LETTER)
+        _, height = LETTER
+        y = height - _PAGE_MARGIN
+
+        for paragraph in text.splitlines() or [""]:
+            for line in _wrap(paragraph, _LINE_WIDTH):
+                if y < _PAGE_MARGIN:
+                    c.showPage()
+                    y = height - _PAGE_MARGIN
+                c.drawString(_PAGE_MARGIN, y, line)
+                y -= _LINE_HEIGHT
+
+        c.save()
+        return buf.getvalue()
 
     # ------------------------------------------------------------------
     # Azure DI call with exponential backoff
@@ -323,8 +469,8 @@ class AzureDiExtractor:
 
     def _analyze_bytes_timed(
         self, pdf_bytes: bytes, client_index: int
-    ) -> tuple[list[KvEntry], str, int, int]:
-        """Returns (entries, content, az_di_ms, di_calls)."""
+    ) -> tuple[list[KvEntry], str, str, int, int]:
+        """Returns (entries, content, language, az_di_ms, di_calls)."""
         client = self._client(client_index)
         delay = _INITIAL_BACKOFF_S
         di_calls = 0
@@ -340,7 +486,13 @@ class AzureDiExtractor:
                 )
                 result = poller.result(timeout=self.poll_timeout_seconds)
                 az_di_ms += int(time.monotonic() * 1_000) - t0
-                return self._to_kv_entries(result), self._get_content(result), az_di_ms, di_calls
+                return (
+                    self._to_kv_entries(result),
+                    self._get_content(result),
+                    self._get_language(result),
+                    az_di_ms,
+                    di_calls,
+                )
             except HttpResponseError as exc:
                 if exc.status_code == 429:
                     # Honor Retry-After header if present, else use backoff
@@ -355,15 +507,15 @@ class AzureDiExtractor:
                     delay = min(delay * 2, _MAX_BACKOFF_S)
                 elif exc.status_code == 403:
                     logger.error("Azure DI quota exhausted on endpoint %d (403).", client_index)
-                    return [], "", az_di_ms, di_calls
+                    return [], "", "en", az_di_ms, di_calls
                 else:
                     raise
         logger.error("Azure DI max retries (%d) exceeded on endpoint %d.", self.max_retries, client_index)
-        return [], "", az_di_ms, di_calls
+        return [], "", "en", az_di_ms, di_calls
 
     def _analyze_bytes(self, pdf_bytes: bytes, client_index: int) -> list[KvEntry]:
         """Backward-compatible wrapper (used by parallel chunk analysis)."""
-        entries, _, _, _ = self._analyze_bytes_timed(pdf_bytes, client_index)
+        entries, _, _, _, _ = self._analyze_bytes_timed(pdf_bytes, client_index)
         return entries
 
     @staticmethod
@@ -384,6 +536,15 @@ class AzureDiExtractor:
         """Full document text from Azure DI's AnalyzeResult — the getContent path."""
         return result.content or ""
 
+    @staticmethod
+    def _get_language(result: Any) -> str:
+        """Highest-confidence detected language locale from Azure DI's AnalyzeResult
+        (e.g. "en", "es") — the getLanguage path. Defaults to "en" if undetected."""
+        if not result.languages:
+            return "en"
+        best = max(result.languages, key=lambda lang: lang.confidence or 0.0)
+        return best.locale or "en"
+
     # ------------------------------------------------------------------
     # PDF manipulation utilities
     # ------------------------------------------------------------------
@@ -403,20 +564,22 @@ class AzureDiExtractor:
         return chunks
 
     def _analyze_chunks_parallel(self, chunks: list[bytes], client_index: int) -> list[KvEntry]:
-        entries, _, _, _ = self._analyze_chunks_parallel_timed(chunks, client_index)
+        entries, _, _, _, _ = self._analyze_chunks_parallel_timed(chunks, client_index)
         return entries
 
     def _analyze_chunks_parallel_timed(
         self, chunks: list[bytes], client_index: int
-    ) -> tuple[list[KvEntry], str, int, int]:
-        """Analyse page chunks in parallel. Returns (entries, content, az_di_ms, di_calls).
+    ) -> tuple[list[KvEntry], str, str, int, int]:
+        """Analyse page chunks in parallel. Returns (entries, content, language, az_di_ms, di_calls).
 
         Content is reassembled in original page-chunk order even though chunks
         complete out of order — entries are extended in completion order, same
-        as before.
+        as before. Language is taken from the first page: a multi-page document
+        is assumed to be in a single language.
         """
         entries: list[KvEntry] = []
         contents: list[str] = [""] * len(chunks)
+        languages: list[str] = [""] * len(chunks)
         total_az_ms = 0
         total_calls = 0
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
@@ -426,12 +589,14 @@ class AzureDiExtractor:
             }
             for future in as_completed(futures):
                 chunk_index = futures[future]
-                chunk_entries, chunk_content, az_ms, calls = future.result()
+                chunk_entries, chunk_content, chunk_language, az_ms, calls = future.result()
                 entries.extend(chunk_entries)
                 contents[chunk_index] = chunk_content
+                languages[chunk_index] = chunk_language
                 total_az_ms += az_ms
                 total_calls += calls
-        return entries, "\n".join(contents), total_az_ms, total_calls
+        language = next((lang for lang in languages if lang), "en")
+        return entries, "\n".join(contents), language, total_az_ms, total_calls
 
     @staticmethod
     def _reduce_dpi(pdf_bytes: bytes) -> bytes:
@@ -463,6 +628,10 @@ class AzureDiExtractor:
             max_retries=self.max_retries,
             poll_timeout_seconds=self.poll_timeout_seconds,
             max_workers=self.max_workers,
+            translation_azure_endpoint=self.translation_azure_endpoint,
+            translation_azure_deployment=self.translation_azure_deployment,
+            translation_api_key=self.translation_api_key,
+            translation_api_version=self.translation_api_version,
         )
 
     @classmethod

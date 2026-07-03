@@ -82,28 +82,52 @@ class TestPipelineWiring:
                 source_doc_type="IRS Form 1040",
             )
         assert isinstance(pipeline, Pipeline)
-        # Translation not configured — ingest connects straight to extractor.
-        assert "translate" not in pipeline.graph.nodes
+        # Classification not configured — extractor connects straight to normalizer.
+        assert "classify" not in pipeline.graph.nodes
+        # Translation is not a separate node — it's config on AzureDiExtractor itself.
+        extractor = pipeline.get_component("extractor")
+        assert extractor._translation_enabled is False
 
-    def test_build_pipeline_with_translation_wires_translate_stage(self):
+    def test_build_pipeline_with_translation_configures_extractor(self):
         with (
             patch("haystack_integrations.components.azure_di_financial.azure_di_extractor.DocumentAnalysisClient"),
-            patch("haystack_integrations.components.azure_di_financial.translation.OpenAIGenerator"),
+            patch("haystack_integrations.components.azure_di_financial.azure_di_extractor.AzureOpenAIGenerator"),
         ):
             pipeline = build_pipeline(
                 azure_endpoint="https://fake.cognitiveservices.azure.com/",
                 azure_api_key="fake-key",
-                translation_model="fake-model",
-                translation_endpoint="https://fake.endpoint/v1",
+                translation_azure_endpoint="https://fake-openai.openai.azure.com/",
+                translation_azure_deployment="fake-deployment",
                 translation_api_key="fake-key",
                 field_map=FIELD_MAP,
                 section="INCOME",
                 source_doc_type="IRS Form 1040",
             )
         assert isinstance(pipeline, Pipeline)
-        assert "translate" in pipeline.graph.nodes
-        assert list(pipeline.graph.successors("ingest")) == ["translate"]
-        assert list(pipeline.graph.successors("translate")) == ["extractor"]
+        extractor = pipeline.get_component("extractor")
+        assert extractor._translation_enabled is True
+        # Still no separate pipeline node for translation.
+        assert "translate" not in pipeline.graph.nodes
+
+    def test_build_pipeline_with_classification_wires_classify_stage(self):
+        with (
+            patch("haystack_integrations.components.azure_di_financial.azure_di_extractor.DocumentAnalysisClient"),
+            patch("haystack_integrations.components.azure_di_financial.irs_form_classifier.AzureOpenAIGenerator"),
+        ):
+            pipeline = build_pipeline(
+                azure_endpoint="https://fake.cognitiveservices.azure.com/",
+                azure_api_key="fake-key",
+                classification_azure_endpoint="https://fake-openai.openai.azure.com/",
+                classification_azure_deployment="fake-deployment",
+                classification_api_key="fake-key",
+                field_map=FIELD_MAP,
+                section="INCOME",
+                source_doc_type="IRS Form 1040",
+            )
+        assert isinstance(pipeline, Pipeline)
+        assert "classify" in pipeline.graph.nodes
+        assert list(pipeline.graph.successors("extractor")) == ["classify"]
+        assert list(pipeline.graph.successors("classify")) == ["normalizer"]
 
 
 # ---------------------------------------------------------------------------

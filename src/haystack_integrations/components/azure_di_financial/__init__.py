@@ -4,11 +4,11 @@
 from .azure_di_extractor import AzureDiExtractor, get_content, get_kv_pairs
 from .delta_calculator import DeltaCalculator
 from .document_ingestion import BytesIngestionComponent, DocumentIngestionComponent, DocumentPayload
+from .irs_form_classifier import IrsFormClassifier
 from .kv_normalizer import KvNormalizer
 from .models.extracted_field import ExtractedField, Severity
 from .models.kv_entry import KvEntry
 from .pipeline import build_pipeline
-from .translation import DocumentTranslationComponent
 
 __all__ = [
     "AzureDiExtractor",
@@ -17,7 +17,7 @@ __all__ = [
     "BytesIngestionComponent",
     "DocumentIngestionComponent",
     "DocumentPayload",
-    "DocumentTranslationComponent",
+    "IrsFormClassifier",
     "ExtractedField",
     "Severity",
     "KvEntry",

@@ -19,7 +19,7 @@ def make_field(field_name: str, extracted_value: Decimal | None) -> ExtractedFie
         confidence=Decimal("0.99"),
         source_doc_type="IRS Form 1040",
         source_line_ref=None,
-        section="HHA_INCOME",
+        section="INCOME",
     )
 
 

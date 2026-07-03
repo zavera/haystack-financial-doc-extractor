@@ -76,8 +76,8 @@ FIELD_MAP_W2 = {
 }
 
 # ---------------------------------------------------------------------------
-# Reference values — what the student/applicant self-reported.
-# These come from PowerFAIDS, SIS, or application form.
+# Reference values — what the client/taxpayer self-reported.
+# These come from your practice management system, prior-year return, or intake form.
 # Delta = |reference - extracted|. HIGH >= $500, MEDIUM >= $100, LOW < $100.
 # ---------------------------------------------------------------------------
 REFERENCE_VALUES = {
