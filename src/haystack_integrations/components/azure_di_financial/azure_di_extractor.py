@@ -198,10 +198,14 @@ class AzureDiExtractor:
                     "source_name": str,
                     "metadata":    dict,
                     "kv_entries":  list[KvEntry],
+                    "content":     str,   # full document text from Azure DI's AnalyzeResult
                     "stage_used":  str,   # STAGE-0|STAGE-1|STAGE-2|STAGE-3|ERROR
                     "error":       str | None,
                     "endpoint_index": int,  # which pool slot handled this doc
                 }
+
+            Use :func:`get_kv_pairs` / :func:`get_content` to read these two
+            fields off an extraction dict without depending on its exact shape.
         """
         results = []
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
@@ -237,12 +241,13 @@ class AzureDiExtractor:
         }
         start_ms = int(time.monotonic() * 1_000)
         try:
-            entries, stage, az_di_ms, di_calls = self._run_recovery_chain(doc.bytes_, client_index)
+            entries, content, stage, az_di_ms, di_calls = self._run_recovery_chain(doc.bytes_, client_index)
             total_ms = int(time.monotonic() * 1_000) - start_ms
             form_type = _infer_form_type(entries)
             return {
                 **base,
                 "kv_entries":   entries,
+                "content":      content,
                 "stage_used":   stage,
                 "form_type":    form_type,
                 "kv_count":     len(entries),
@@ -257,6 +262,7 @@ class AzureDiExtractor:
             return {
                 **base,
                 "kv_entries":   [],
+                "content":      "",
                 "stage_used":   "ERROR",
                 "form_type":    "unknown",
                 "kv_count":     0,
@@ -268,43 +274,48 @@ class AzureDiExtractor:
 
     def _run_recovery_chain(
         self, pdf_bytes: bytes, client_index: int
-    ) -> tuple[list[KvEntry], str, int, int]:
-        """Returns (entries, stage, az_di_ms, di_calls)."""
+    ) -> tuple[list[KvEntry], str, str, int, int]:
+        """Returns (entries, content, stage, az_di_ms, di_calls)."""
         total_az_ms = 0
         total_calls = 0
+        last_content = ""
 
-        entries, az_ms, calls = self._analyze_bytes_timed(pdf_bytes, client_index)
+        entries, content, az_ms, calls = self._analyze_bytes_timed(pdf_bytes, client_index)
         total_az_ms += az_ms
         total_calls += calls
+        last_content = content or last_content
         if entries:
-            return entries, "STAGE-0", total_az_ms, total_calls
+            return entries, content, "STAGE-0", total_az_ms, total_calls
 
         logger.debug("Stage 0 returned empty — trying page splitter")
         chunks = self._split_pages(pdf_bytes)
-        entries, az_ms, calls = self._analyze_chunks_parallel_timed(chunks, client_index)
+        entries, content, az_ms, calls = self._analyze_chunks_parallel_timed(chunks, client_index)
         total_az_ms += az_ms
         total_calls += calls
+        last_content = content or last_content
         if entries:
-            return entries, "STAGE-1", total_az_ms, total_calls
+            return entries, content, "STAGE-1", total_az_ms, total_calls
 
         logger.debug("Stage 1 returned empty — trying DPI reduction")
         reduced = self._reduce_dpi(pdf_bytes)
-        entries, az_ms, calls = self._analyze_bytes_timed(reduced, client_index)
+        entries, content, az_ms, calls = self._analyze_bytes_timed(reduced, client_index)
         total_az_ms += az_ms
         total_calls += calls
+        last_content = content or last_content
         if entries:
-            return entries, "STAGE-2", total_az_ms, total_calls
+            return entries, content, "STAGE-2", total_az_ms, total_calls
 
         logger.debug("Stage 2 returned empty — trying rotation block")
         for degrees in _ROTATION_DEGREES:
             rotated = self._rotate_pdf(pdf_bytes, degrees)
-            entries, az_ms, calls = self._analyze_bytes_timed(rotated, client_index)
+            entries, content, az_ms, calls = self._analyze_bytes_timed(rotated, client_index)
             total_az_ms += az_ms
             total_calls += calls
+            last_content = content or last_content
             if entries:
-                return entries, f"STAGE-3 ({degrees}deg)", total_az_ms, total_calls
+                return entries, content, f"STAGE-3 ({degrees}deg)", total_az_ms, total_calls
 
-        return [], "EXHAUSTED", total_az_ms, total_calls
+        return [], last_content, "EXHAUSTED", total_az_ms, total_calls
 
     # ------------------------------------------------------------------
     # Azure DI call with exponential backoff
@@ -312,8 +323,8 @@ class AzureDiExtractor:
 
     def _analyze_bytes_timed(
         self, pdf_bytes: bytes, client_index: int
-    ) -> tuple[list[KvEntry], int, int]:
-        """Returns (entries, az_di_ms, di_calls)."""
+    ) -> tuple[list[KvEntry], str, int, int]:
+        """Returns (entries, content, az_di_ms, di_calls)."""
         client = self._client(client_index)
         delay = _INITIAL_BACKOFF_S
         di_calls = 0
@@ -329,7 +340,7 @@ class AzureDiExtractor:
                 )
                 result = poller.result(timeout=self.poll_timeout_seconds)
                 az_di_ms += int(time.monotonic() * 1_000) - t0
-                return self._to_kv_entries(result), az_di_ms, di_calls
+                return self._to_kv_entries(result), self._get_content(result), az_di_ms, di_calls
             except HttpResponseError as exc:
                 if exc.status_code == 429:
                     # Honor Retry-After header if present, else use backoff
@@ -344,15 +355,15 @@ class AzureDiExtractor:
                     delay = min(delay * 2, _MAX_BACKOFF_S)
                 elif exc.status_code == 403:
                     logger.error("Azure DI quota exhausted on endpoint %d (403).", client_index)
-                    return [], az_di_ms, di_calls
+                    return [], "", az_di_ms, di_calls
                 else:
                     raise
         logger.error("Azure DI max retries (%d) exceeded on endpoint %d.", self.max_retries, client_index)
-        return [], az_di_ms, di_calls
+        return [], "", az_di_ms, di_calls
 
     def _analyze_bytes(self, pdf_bytes: bytes, client_index: int) -> list[KvEntry]:
         """Backward-compatible wrapper (used by parallel chunk analysis)."""
-        entries, _, _ = self._analyze_bytes_timed(pdf_bytes, client_index)
+        entries, _, _, _ = self._analyze_bytes_timed(pdf_bytes, client_index)
         return entries
 
     @staticmethod
@@ -367,6 +378,11 @@ class AzureDiExtractor:
                 confidence = Decimal(str(round(pair.confidence, 4))) if pair.confidence is not None else Decimal("0")
                 entries.append(KvEntry(key=key, value=value, confidence=confidence))
         return entries
+
+    @staticmethod
+    def _get_content(result: Any) -> str:
+        """Full document text from Azure DI's AnalyzeResult — the getContent path."""
+        return result.content or ""
 
     # ------------------------------------------------------------------
     # PDF manipulation utilities
@@ -387,27 +403,35 @@ class AzureDiExtractor:
         return chunks
 
     def _analyze_chunks_parallel(self, chunks: list[bytes], client_index: int) -> list[KvEntry]:
-        entries, _, _ = self._analyze_chunks_parallel_timed(chunks, client_index)
+        entries, _, _, _ = self._analyze_chunks_parallel_timed(chunks, client_index)
         return entries
 
     def _analyze_chunks_parallel_timed(
         self, chunks: list[bytes], client_index: int
-    ) -> tuple[list[KvEntry], int, int]:
-        """Analyse page chunks in parallel. Returns (entries, az_di_ms, di_calls)."""
+    ) -> tuple[list[KvEntry], str, int, int]:
+        """Analyse page chunks in parallel. Returns (entries, content, az_di_ms, di_calls).
+
+        Content is reassembled in original page-chunk order even though chunks
+        complete out of order — entries are extended in completion order, same
+        as before.
+        """
         entries: list[KvEntry] = []
+        contents: list[str] = [""] * len(chunks)
         total_az_ms = 0
         total_calls = 0
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            futures = [
-                executor.submit(self._analyze_bytes_timed, chunk, client_index)
-                for chunk in chunks
-            ]
+            futures = {
+                executor.submit(self._analyze_bytes_timed, chunk, client_index): i
+                for i, chunk in enumerate(chunks)
+            }
             for future in as_completed(futures):
-                chunk_entries, az_ms, calls = future.result()
+                chunk_index = futures[future]
+                chunk_entries, chunk_content, az_ms, calls = future.result()
                 entries.extend(chunk_entries)
+                contents[chunk_index] = chunk_content
                 total_az_ms += az_ms
                 total_calls += calls
-        return entries, total_az_ms, total_calls
+        return entries, "\n".join(contents), total_az_ms, total_calls
 
     @staticmethod
     def _reduce_dpi(pdf_bytes: bytes) -> bytes:
@@ -444,3 +468,18 @@ class AzureDiExtractor:
     @classmethod
     def from_dict(cls, data: dict) -> "AzureDiExtractor":
         return default_from_dict(cls, data)
+
+
+# ---------------------------------------------------------------------------
+# Extraction accessors — read one field off an AzureDiExtractor extraction
+# dict without depending on its exact shape.
+# ---------------------------------------------------------------------------
+
+def get_kv_pairs(extraction: dict[str, Any]) -> list[KvEntry]:
+    """Return the raw KV entries for one document from its extraction dict."""
+    return extraction.get("kv_entries", [])
+
+
+def get_content(extraction: dict[str, Any]) -> str:
+    """Return the full document text for one document from its extraction dict."""
+    return extraction.get("content", "")

@@ -10,7 +10,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from haystack_integrations.components.azure_di_financial.azure_di_extractor import AzureDiExtractor
+from haystack_integrations.components.azure_di_financial.azure_di_extractor import (
+    AzureDiExtractor,
+    get_content,
+    get_kv_pairs,
+)
+from haystack_integrations.components.azure_di_financial.document_ingestion import DocumentPayload
 
 FAKE_ENDPOINT_1 = "https://resource-eastus.cognitiveservices.azure.com/"
 FAKE_ENDPOINT_2 = "https://resource-westeu.cognitiveservices.azure.com/"
@@ -244,3 +249,58 @@ class TestBuildPipeline:
             )
         extractor = p.get_component("extractor")
         assert extractor.max_workers == 16
+
+
+# ---------------------------------------------------------------------------
+# getKvPair / getContent — reading both fields off an extraction dict
+# ---------------------------------------------------------------------------
+
+def _mock_pair(key: str, value: str, confidence: float = 0.9) -> MagicMock:
+    pair = MagicMock()
+    pair.key.content = key
+    pair.value.content = value
+    pair.confidence = confidence
+    return pair
+
+
+def _mock_analyze_result(content: str | None, pairs: list) -> MagicMock:
+    result = MagicMock()
+    result.content = content
+    result.key_value_pairs = pairs
+    return result
+
+
+@pytest.mark.unit
+class TestContentExtraction:
+
+    def test_to_kv_entries_reads_pairs_from_result(self):
+        result = _mock_analyze_result("Full raw document text", [_mock_pair("Wages", "50000")])
+        entries = AzureDiExtractor._to_kv_entries(result)
+        assert entries[0].key == "Wages"
+        assert entries[0].value == "50000"
+
+    def test_get_content_reads_content_from_result(self):
+        result = _mock_analyze_result("Full raw document text", [])
+        assert AzureDiExtractor._get_content(result) == "Full raw document text"
+
+    def test_get_content_handles_none_content(self):
+        result = _mock_analyze_result(None, [])
+        assert AzureDiExtractor._get_content(result) == ""
+
+    def test_run_includes_content_alongside_kv_entries(self):
+        ext = make_extractor(endpoint=FAKE_ENDPOINT_1, api_key=FAKE_KEY_1)
+        fake_result = _mock_analyze_result("Document body text", [_mock_pair("Wages", "50000")])
+        fake_poller = MagicMock()
+        fake_poller.result.return_value = fake_result
+        ext._clients[0].begin_analyze_document = MagicMock(return_value=fake_poller)
+
+        doc = DocumentPayload(bytes_=b"%PDF-fake%", document_id="doc-1", source_name="w2.pdf")
+        extraction = ext.run([doc])["extractions"][0]
+
+        assert extraction["content"] == "Document body text"
+        assert get_content(extraction) == "Document body text"
+        assert get_kv_pairs(extraction)[0].key == "Wages"
+
+    def test_get_kv_pairs_and_get_content_default_to_empty(self):
+        assert get_kv_pairs({}) == []
+        assert get_content({}) == ""

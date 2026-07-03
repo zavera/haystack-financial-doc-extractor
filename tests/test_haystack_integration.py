@@ -82,6 +82,28 @@ class TestPipelineWiring:
                 source_doc_type="IRS Form 1040",
             )
         assert isinstance(pipeline, Pipeline)
+        # Translation not configured — ingest connects straight to extractor.
+        assert "translate" not in pipeline.graph.nodes
+
+    def test_build_pipeline_with_translation_wires_translate_stage(self):
+        with (
+            patch("haystack_integrations.components.azure_di_financial.azure_di_extractor.DocumentAnalysisClient"),
+            patch("haystack_integrations.components.azure_di_financial.translation.OpenAIGenerator"),
+        ):
+            pipeline = build_pipeline(
+                azure_endpoint="https://fake.cognitiveservices.azure.com/",
+                azure_api_key="fake-key",
+                translation_model="fake-model",
+                translation_endpoint="https://fake.endpoint/v1",
+                translation_api_key="fake-key",
+                field_map=FIELD_MAP,
+                section="INCOME",
+                source_doc_type="IRS Form 1040",
+            )
+        assert isinstance(pipeline, Pipeline)
+        assert "translate" in pipeline.graph.nodes
+        assert list(pipeline.graph.successors("ingest")) == ["translate"]
+        assert list(pipeline.graph.successors("translate")) == ["extractor"]
 
 
 # ---------------------------------------------------------------------------

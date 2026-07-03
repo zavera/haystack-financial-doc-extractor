@@ -8,6 +8,8 @@ Pre-wired Haystack pipeline for financial document KV extraction.
 
     BytesIngestionComponent
             |
+    DocumentTranslationComponent  (optional — non-English documents only)
+            |
     AzureDiExtractor  (single endpoint or multi-endpoint pool)
             |
     KvNormalizer
@@ -39,6 +41,20 @@ Multi-endpoint usage (scales TPS quota linearly)::
         max_workers=8,  # recommended: len(endpoints) * 4
     )
 
+With translation enabled (detects non-English documents, translates to English
+before extraction)::
+
+    pipeline = build_pipeline(
+        azure_endpoint="https://<resource>.cognitiveservices.azure.com/",
+        azure_api_key="...",
+        translation_model="gpt-4o-mini",
+        translation_endpoint="https://api.openai.com/v1",
+        translation_api_key="...",
+        field_map={"amount from line 11a adjusted gross income": "agi"},
+        section="INCOME",
+        source_doc_type="IRS Form 1040",
+    )
+
 Running the pipeline::
 
     result = pipeline.run({
@@ -61,6 +77,7 @@ from .azure_di_extractor import AzureDiExtractor
 from .delta_calculator import DeltaCalculator
 from .document_ingestion import BytesIngestionComponent
 from .kv_normalizer import KvNormalizer
+from .translation import DocumentTranslationComponent
 
 
 def build_pipeline(
@@ -72,6 +89,11 @@ def build_pipeline(
     azure_api_key: str | None = None,
     # Multi-endpoint pool (load distribution)
     azure_endpoints: list[dict[str, str]] | None = None,
+    # Translation (optional) — detects non-English documents and translates
+    # them to English before AzureDiExtractor runs.
+    translation_model: str | None = None,
+    translation_endpoint: str | None = None,
+    translation_api_key: str | None = None,
     # Shared config
     model_id: str = "prebuilt-document",
     confidence_threshold: float = 0.5,
@@ -93,6 +115,12 @@ def build_pipeline(
         azure_endpoints:        List of ``{"endpoint": ..., "api_key": ...}`` dicts.
                                 Overrides ``azure_endpoint``/``azure_api_key``.
                                 Each additional endpoint multiplies effective TPS quota.
+        translation_model:      Chat-completion model for pre-extraction translation
+                                (e.g. ``"gpt-4o-mini"``). Provide together with
+                                ``translation_endpoint``/``translation_api_key`` to
+                                enable the language-detection + translation stage.
+        translation_endpoint:   Base URL of the AI endpoint (OpenAI-compatible).
+        translation_api_key:    API key for the translation endpoint.
         model_id:               Azure DI model. Default: ``prebuilt-document``.
         confidence_threshold:   Drop KV entries below this confidence. Default: 0.5.
         high_threshold:         Delta >= this -> HIGH severity. Default: 500.
@@ -145,7 +173,21 @@ def build_pipeline(
         DeltaCalculator(high_threshold=high_threshold, medium_threshold=medium_threshold),
     )
 
-    pipeline.connect("ingest.documents", "extractor.documents")
+    translation_enabled = bool(translation_model and translation_endpoint and translation_api_key)
+    if translation_enabled:
+        pipeline.add_component(
+            "translate",
+            DocumentTranslationComponent(
+                model=translation_model,
+                endpoint=translation_endpoint,
+                api_key=translation_api_key,
+            ),
+        )
+        pipeline.connect("ingest.documents", "translate.documents")
+        pipeline.connect("translate.documents", "extractor.documents")
+    else:
+        pipeline.connect("ingest.documents", "extractor.documents")
+
     pipeline.connect("extractor.extractions", "normalizer.extractions")
     pipeline.connect("normalizer.fields", "delta.fields")
 
