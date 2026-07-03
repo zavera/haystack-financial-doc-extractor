@@ -8,12 +8,10 @@ Run:
 """
 
 import argparse
-import json
 import os
-from decimal import Decimal
 from pathlib import Path
 
-from haystack_financial_doc_extractor import build_pipeline, SqliteExtractionStore
+from haystack_integrations.components.azure_di_financial import build_pipeline
 
 # ---------------------------------------------------------------------------
 # IRS Form 1040 field map — Azure DI raw label → canonical field name
@@ -34,7 +32,7 @@ FIELD_MAP_1040 = {
     "federal income tax withheld": "tax_withheld",
 }
 
-# Simulated reference values from an authoritative system (e.g. PowerFAIDS).
+# Simulated reference values from an authoritative system (e.g. practice management software).
 # In production replace this with a real fetch.
 REFERENCE_VALUES = {
     "agi": 75_000,
@@ -47,51 +45,35 @@ REFERENCE_VALUES = {
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run financial doc extraction pipeline")
     parser.add_argument("--pdf", required=True, help="Path to PDF file")
-    parser.add_argument("--db", default="extractions.db", help="SQLite database path")
-    parser.add_argument("--section", default="HHA_INCOME", help="Section key")
+    parser.add_argument("--section", default="INCOME", help="Section key")
     args = parser.parse_args()
 
     pdf_path = Path(args.pdf)
     pdf_bytes = pdf_path.read_bytes()
 
-    store = SqliteExtractionStore(db_path=args.db)
+    pipeline = build_pipeline(
+        azure_endpoint=os.environ["AZURE_DI_ENDPOINT"],
+        azure_api_key=os.environ["AZURE_DI_KEY"],
+        field_map=FIELD_MAP_1040,
+        section=args.section,
+        source_doc_type="IRS Form 1040",
+    )
 
-    # Cache check — skip Azure DI if we've already processed this exact file
-    if store.is_cached(document_id=pdf_path.name, pdf_bytes=pdf_bytes):
-        print(f"Cache hit for {pdf_path.name} — loading from SQLite")
-        fields = store.load_cached(document_id=pdf_path.name, pdf_bytes=pdf_bytes)
-    else:
-        pipeline = build_pipeline(
-            azure_endpoint=os.environ["AZURE_DI_ENDPOINT"],
-            azure_api_key=os.environ["AZURE_DI_KEY"],
-            field_map=FIELD_MAP_1040,
-            section=args.section,
-            source_doc_type="IRS Form 1040",
-        )
+    result = pipeline.run({
+        "ingest": {
+            "bytes_list": [pdf_bytes],
+            "document_ids": [pdf_path.name],
+            "source_names": [pdf_path.name],
+        },
+        "delta": {
+            "reference_values": REFERENCE_VALUES,
+        },
+    })
 
-        result = pipeline.run({
-            "ingest": {
-                "bytes_list": [pdf_bytes],
-                "document_ids": [pdf_path.name],
-                "source_names": [pdf_path.name],
-            },
-            "delta": {
-                "reference_values": REFERENCE_VALUES,
-            },
-        })
-
-        fields = result["delta"]["fields"]
-        extractions = result["extractor"]["extractions"]
-        stage_used = extractions[0]["stage_used"] if extractions else "UNKNOWN"
-
-        store.save(
-            document_id=pdf_path.name,
-            source_name=pdf_path.name,
-            pdf_bytes=pdf_bytes,
-            stage_used=stage_used,
-            fields=fields,
-        )
-        print(f"Extraction complete via {stage_used}. Persisted {len(fields)} fields.")
+    fields = result["delta"]["fields"]
+    extractions = result["extractor"]["extractions"]
+    stage_used = extractions[0]["stage_used"] if extractions else "UNKNOWN"
+    print(f"Extraction complete via {stage_used}. {len(fields)} fields extracted.")
 
     # Print results
     print(f"\n{'FIELD':<30} {'EXTRACTED':>12} {'REFERENCE':>12} {'DELTA':>10} SEVERITY")
